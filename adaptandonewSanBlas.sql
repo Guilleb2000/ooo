@@ -3427,30 +3427,30 @@ BEGIN
     RAISE NOTICE 'cb_count: %', cb_count;
 
     IF cb_count > 0 THEN
-        EXECUTE format('SELECT id_gis FROM (SELECT geom as a, * FROM %I.cw_connectivity_box) WHERE ST_Intersects(geom, $1)', schema_name)
+        EXECUTE format('SELECT id_gis FROM %I.cw_connectivity_box WHERE ST_Intersects(layout_geom, $1)', schema_name)
         INTO id_cb
         USING NEW.geom;
         RAISE NOTICE 'id_cb: %', id_cb;
 
-        EXECUTE format('SELECT * FROM %I.cw_connectivity_box WHERE ST_Intersects(geom, $1)', schema_name)
+        EXECUTE format('SELECT * FROM %I.cw_connectivity_box WHERE id_gis = $1', schema_name)
         INTO cb_rec
-        USING NEW.geom;
+        USING id_cb;
         RAISE NOTICE 'cb_rec: %', cb_rec;
 
-        EXECUTE format('SELECT diagonal_geom FROM %I.cw_connectivity_box WHERE id_gis=$1', schema_name)
+        EXECUTE format('SELECT diagonal_geom FROM %I.cw_connectivity_box WHERE id_gis = $1', schema_name)
         INTO splice_line
         USING id_cb;
         RAISE NOTICE 'splice_line: %', ST_AsText(splice_line);
 
-        splice_points := (SELECT ST_LineInterpolatePoints(ST_Linemerge(splice_line), 0.1, true));
+        splice_points := ST_LineInterpolatePoints(ST_Linemerge(splice_line), 0.1, true);
         RAISE NOTICE 'splice_points: %', ST_AsText(splice_points);
 
-        EXECUTE format('SELECT ST_StartPoint(ST_ExteriorRing(layout_geom)) FROM %I.cw_connectivity_box WHERE id_gis=$1', schema_name)
+        EXECUTE format('SELECT ST_StartPoint(ST_ExteriorRing(layout_geom)) FROM %I.cw_connectivity_box WHERE id_gis = $1', schema_name)
         INTO cb_boundary_point_1
         USING id_cb;
         RAISE NOTICE 'cb_boundary_point_1: %', ST_AsText(cb_boundary_point_1);
 
-        EXECUTE format('SELECT ST_PointN(ST_ExteriorRing(layout_geom), 2) FROM %I.cw_connectivity_box WHERE id_gis=$1', schema_name)
+        EXECUTE format('SELECT ST_PointN(ST_ExteriorRing(layout_geom), 2) FROM %I.cw_connectivity_box WHERE id_gis = $1', schema_name)
         INTO cb_boundary_point_2
         USING id_cb;
         RAISE NOTICE 'cb_boundary_point_2: %', ST_AsText(cb_boundary_point_2);
@@ -3458,9 +3458,10 @@ BEGIN
         line_for_radians_1 := ST_MakeLine(cb_boundary_point_1, cb_boundary_point_2);
         RAISE NOTICE 'line_for_radians_1: %', ST_AsText(line_for_radians_1);
 
-        line_for_radians_2 := (ST_MakeLine(
+        line_for_radians_2 := ST_MakeLine(
             ST_SetSRID(ST_MakePoint(ST_X(cb_boundary_point_1), ST_Y(cb_boundary_point_2)), 3857),
-            cb_boundary_point_2));
+            cb_boundary_point_2
+        );
         RAISE NOTICE 'line_for_radians_2: %', ST_AsText(line_for_radians_2);
 
         radians_to_rotate := ST_Angle(line_for_radians_2, line_for_radians_1);
@@ -3476,56 +3477,67 @@ BEGIN
             LOOP
                 RAISE NOTICE 'Checking splice point index: %', (ST_NumGeometries(splice_points) / 2) - i;
 
-                EXECUTE format('SELECT count(*) FROM %I.fo_splice WHERE ST_Intersects(ST_GeometryN($1, %L), layout_geom)', schema_name)
+                EXECUTE format('SELECT count(*) FROM %I.fo_splice WHERE ST_Intersects(ST_GeometryN($1, %L), layout_geom)', schema_name, (ST_NumGeometries(splice_points) / 2) - i)
                 INTO splice_count
-                USING splice_points, (ST_NumGeometries(splice_points) / 2) - i;
+                USING splice_points;
                 RAISE NOTICE 'splice_count: %', splice_count;
 
                 IF splice_count = 0 THEN
                     EXECUTE format('
-                    UPDATE %I.fo_splice
-                    SET layout_geom = ST_Rotate(ST_Buffer(ST_GeometryN(%L, %L), 0.175, ''endcap=square''), -%s, ST_Centroid(ST_GeometryN(%L, %L))),
-                        id_gis = CONCAT(''fo_splice_'', %L::text)
-                    WHERE id = %L
-                ', schema_name, splice_points, (ST_NumGeometries(splice_points) / 2) - i, radians_to_rotate, splice_points, (ST_NumGeometries(splice_points) / 2) - i, NEW.id_auto, NEW.id);
+                        UPDATE %I.fo_splice
+                        SET layout_geom = ST_Rotate(ST_Buffer(ST_GeometryN(%L, %L), 0.175, ''endcap=square''), -%s, ST_Centroid(ST_GeometryN(%L, %L))),
+                            id_gis = CONCAT(''fo_splice_'', %L::text)
+                        WHERE id = %L
+                    ', schema_name, splice_points, (ST_NumGeometries(splice_points) / 2) - i, radians_to_rotate, splice_points, (ST_NumGeometries(splice_points) / 2) - i, NEW.id_auto, NEW.id);
                     RAISE NOTICE 'Splice point updated at index: %', (ST_NumGeometries(splice_points) / 2) - i;
                     EXIT;
                 END IF;
+            END LOOP;
 
-            EXECUTE format('SELECT count(*) FROM %I.fo_splice WHERE ST_Intersects(ST_GeometryN($1, $2), layout_geom)', schema_name) INTO splice_count
-            USING splice_points, (ST_NumGeometries(splice_points) / 2) + i;
+            FOR i IN 1..(ST_NumGeometries(splice_points) / 2)
+            LOOP
+                RAISE NOTICE 'Checking splice point index: %', (ST_NumGeometries(splice_points) / 2) + i;
+
+                EXECUTE format('SELECT count(*) FROM %I.fo_splice WHERE ST_Intersects(ST_GeometryN($1, %L), layout_geom)', schema_name, (ST_NumGeometries(splice_points) / 2) + i)
+                INTO splice_count
+                USING splice_points;
                 RAISE NOTICE 'splice_count: %', splice_count;
 
                 IF splice_count = 0 THEN
-                    EXECUTE format('UPDATE %I.fo_splice
-                    SET layout_geom = ST_Rotate(ST_Buffer(ST_GeometryN(%L, %L), 0.175, ''endcap=square''), -%s, ST_Centroid(ST_GeometryN(%L, %L))),
-                        id_gis = CONCAT(''fo_splice_'', %L::text)
-                    WHERE id = %L', dest_schema, splice_points, (ST_NumGeometries(splice_points) / 2) + i, radians_to_rotate, splice_points, (ST_NumGeometries(splice_points) / 2) + i, NEW.id_auto, NEW.id);
+                    EXECUTE format('
+                        UPDATE %I.fo_splice
+                        SET layout_geom = ST_Rotate(ST_Buffer(ST_GeometryN(%L, %L), 0.175, ''endcap=square''), -%s, ST_Centroid(ST_GeometryN(%L, %L))),
+                            id_gis = CONCAT(''fo_splice_'', %L::text)
+                        WHERE id = %L
+                    ', schema_name, splice_points, (ST_NumGeometries(splice_points) / 2) + i, radians_to_rotate, splice_points, (ST_NumGeometries(splice_points) / 2) + i, NEW.id_auto, NEW.id);
                     RAISE NOTICE 'Splice point updated at index: %', (ST_NumGeometries(splice_points) / 2) + i;
                     EXIT;
                 END IF;
-            END LOOP;    
+            END LOOP;
         ELSE
             FOR i IN 1..ST_NumGeometries(splice_points)-1
             LOOP
                 RAISE NOTICE 'Checking splice point index: %', i;
 
-            EXECUTE format('SELECT count(*) FROM %I.fo_splice WHERE ST_Intersects(ST_GeometryN($1, $2), layout_geom)', schema_name) INTO splice_count
-            USING splice_points, i;
+                EXECUTE format('SELECT count(*) FROM %I.fo_splice WHERE ST_Intersects(ST_GeometryN($1, %L), layout_geom)', schema_name, i)
+                INTO splice_count
+                USING splice_points;
                 RAISE NOTICE 'splice_count: %', splice_count;
 
                 IF splice_count = 0 THEN
-                    EXECUTE format('UPDATE %I.fo_splice
-                    SET layout_geom = ST_Rotate(ST_Buffer(ST_GeometryN(%L, %L), 0.175, ''endcap=square''), -%s, ST_Centroid(ST_GeometryN(%L, %L))),
-                        id_gis = CONCAT(''fo_splice_'', %L::text)
-                    WHERE id = %L', schema_name, splice_points, i, radians_to_rotate, splice_points, i, NEW.id_auto, NEW.id);
+                    EXECUTE format('
+                        UPDATE %I.fo_splice
+                        SET layout_geom = ST_Rotate(ST_Buffer(ST_GeometryN(%L, %L), 0.175, ''endcap=square''), -%s, ST_Centroid(ST_GeometryN(%L, %L))),
+                            id_gis = CONCAT(''fo_splice_'', %L::text)
+                        WHERE id = %L
+                    ', schema_name, splice_points, i, radians_to_rotate, splice_points, i, NEW.id_auto, NEW.id);
                     RAISE NOTICE 'Splice point updated at index: %', i;
                     EXIT;
                 END IF;
-            END LOOP;        
+            END LOOP;
         END IF;
 
-        EXECUTE format('SELECT count(*) FROM %I.cw_pole WHERE ST_Intersects(geom, (SELECT geom FROM %I.cw_connectivity_box WHERE id_gis=$1))', schema_name, schema_name)
+        EXECUTE format('SELECT count(*) FROM %I.cw_pole WHERE ST_Intersects(geom, (SELECT geom FROM %I.cw_connectivity_box WHERE id_gis = $1))', schema_name, schema_name)
         INTO pole_count
         USING id_cb;
         RAISE NOTICE 'pole_count: %', pole_count;
@@ -3546,22 +3558,27 @@ BEGIN
             USING NEW.geom;
             RAISE NOTICE 'building_record: %', building_record;
 
-            EXECUTE format('UPDATE %I.fo_splice SET layout_geom = ST_Rotate(ST_Buffer(%L, 0.175, ''endcap=square''), %L, %L), id_gis = CONCAT(''fo_splice_'', %L::text) WHERE id = %L', schema_name, NEW.geom, building_record.rotate_rads, NEW.id_auto, NEW.id);
+            EXECUTE format('
+                UPDATE %I.fo_splice
+                SET layout_geom = ST_Rotate(ST_Buffer(%L, 0.175, ''endcap=square''), %L, ST_Centroid(%L)),
+                    id_gis = CONCAT(''fo_splice_'', %L::text)
+                WHERE id = %L
+            ', schema_name, NEW.geom, building_record.rotate_rads, NEW.geom, NEW.id_auto, NEW.id);
             RAISE NOTICE 'Splice updated for building, NEW.id: %', NEW.id;
         END IF;
     END IF;
 
     RAISE NOTICE 'Fin de fo_splice_insert';
 
-    -- Inserta en la tabla saved_changes
+    -- Insertar en la tabla saved_changes
     EXECUTE format('INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3::uuid, $4)', schema_name)
     USING NEW.id, CONCAT('fo_splice_', NEW.id_auto::TEXT), edited_by_value, query_merge_value;
-
 
     RETURN NEW;
 END;
 $$
 LANGUAGE plpgsql;
+
 
 
 CREATE TRIGGER fo_splice_triggger
@@ -7195,7 +7212,7 @@ SELECT insert_object(
 
 
 SELECT insert_object(
-    'objects', 
+    'objects',
     'fo_cable', 
     'SRID=3857;LINESTRING(-403695.08 4928688.35, -403608.66 4928732.30)', 
     '5d248fef-8bc1-40fb-ab56-9caa1c65cefc'
@@ -7209,6 +7226,7 @@ SELECT insert_object(
     'cw_building',
     'SRID=3857;POINT(-404270.31 4928508.68)',
     'fe2ddf89-87ae-4b29-8123-63782d2c8635',
+    NULL,
     30,
     10
 );
@@ -7218,6 +7236,7 @@ SELECT insert_object(
     'cw_building',
     'SRID=3857;POINT(-404270.31 4928508.68)',
     'fe2ddf89-87ae-4b29-8123-63782d2c8635',
+    NULL,
     9,
     10
 );
@@ -7288,26 +7307,28 @@ CALL delete_point_object('objects', 'cw_connectivity_box', 'cw_connectivity_box_
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
+
 CREATE OR REPLACE FUNCTION insert_fo_splice_on_building(
     schema_name TEXT, 
-    id_gis_building VARCHAR, 
-    n_floor INTEGER
+    id_gis_building VARCHAR,
+    n_floor INTEGER,
+    edited_by UUID
 ) RETURNS VOID AS
 $$
 DECLARE
     building_record RECORD;
     guitar_splices_line GEOMETRY;
     guitar_splices_line_points GEOMETRY;
-    aux_line_for_radians GEOMETRY;
+    splice_geometry GEOMETRY;
 BEGIN
     -- Obtener el registro del edificio usando el esquema proporcionado
     EXECUTE format('
         SELECT * 
-        FROM %I.cw_building 
+        FROM %I.cw_building
         WHERE id_gis = $1', schema_name)
     INTO building_record
     USING id_gis_building;
-
+    
     IF n_floor IS NOT NULL THEN
         IF n_floor <= building_record.n_floors THEN
             guitar_splices_line := ST_OffsetCurve(ST_MakeLine(
@@ -7317,14 +7338,17 @@ BEGIN
 
             guitar_splices_line_points := ST_LineInterpolatePoints(guitar_splices_line, (1::FLOAT / (building_record.n_floors + 1)::FLOAT), true);
 
+            splice_geometry := ST_GeometryN(guitar_splices_line_points, (building_record.n_floors + 1) - n_floor);
+
             -- Insertar el empalme en la tabla correspondiente al esquema proporcionado
             EXECUTE format('
-                INSERT INTO %I.fo_splice(geom) 
-                VALUES (ST_GeometryN($1, $2))', schema_name)
-            USING guitar_splices_line_points, (building_record.n_floors + 1) - n_floor;
+                INSERT INTO %I.fo_splice(geom, edited_by)
+                VALUES ($1, $2)', schema_name)
+            USING splice_geometry, edited_by;
         END IF;
     ELSE
         -- Manejo del caso cuando n_floor es NULL
+        -- Aquí puedes agregar cualquier lógica adicional necesaria para manejar el caso cuando n_floor es NULL
     END IF;
 END;
 $$
