@@ -2237,7 +2237,7 @@ BEGIN
         
         FOR current_aux_record IN SELECT * FROM cable_connectivity
         LOOP
-            PERFORM connect_cable(current_aux_record.id_gis_cable, current_aux_record.id_gis_splice);
+            PERFORM connect_cable(current_aux_record.id_gis_cable, current_aux_record.id_gis_splice, schema_name);
         END LOOP;
 
         PERFORM update_stored_conections(schema_name);
@@ -2522,7 +2522,7 @@ BEGIN
         -- Se regeneran los cables
         FOR cur_aux IN SELECT * FROM cable_connectivity
         LOOP
-            PERFORM connect_cable(cur_aux.id_gis_cable, cur_aux.id_gis_splice);
+            PERFORM connect_cable(cur_aux.id_gis_cable, cur_aux.id_gis_splice, schema_name);
         END LOOP;
 
         -- Se regeneran las conexiones
@@ -5036,7 +5036,6 @@ END;
 $$
 LANGUAGE plpgsql;
 
-
 CREATE TRIGGER client_insert_trigger
 	AFTER INSERT ON objects.cw_client
 	FOR EACH ROW EXECUTE PROCEDURE cw_client_insert();
@@ -5324,8 +5323,11 @@ CREATE TRIGGER pot_insert_trigger
 ---------------------------------------------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------------------------------------------
 
-
-CREATE OR REPLACE FUNCTION connect_cable(id_gis_cable VARCHAR, id_gis_splice VARCHAR, schema_name VARCHAR) RETURNS void
+CREATE OR REPLACE FUNCTION connect_cable(
+    id_gis_cable VARCHAR, 
+    id_gis_splice VARCHAR, 
+    schema_name TEXT
+) RETURNS void
 AS
 $$
 DECLARE
@@ -5343,7 +5345,6 @@ DECLARE
     width FLOAT;
     current_distance FLOAT;
     dist FLOAT;
-    guitar_center INTEGER;
     face_1 GEOMETRY;
     face_2 GEOMETRY;
     face_3 GEOMETRY;
@@ -5352,28 +5353,49 @@ DECLARE
     splice_face_2 GEOMETRY;
     splice_face_3 GEOMETRY;
     splice_face_4 GEOMETRY;
-    clossest_face GEOMETRY;
-    clossest_splice_face GEOMETRY;
+    closest_face GEOMETRY;
+    closest_splice_face GEOMETRY;
 BEGIN
     current_distance := 0;
     width := 0.0125;
-    
+
     -- Se obtienen los registros necesarios (cable, empalme y conectivity_box)
     EXECUTE format('SELECT * FROM %I.fo_cable WHERE id_gis = $1', schema_name) INTO cable_rec USING id_gis_cable;
     EXECUTE format('SELECT * FROM %I.fo_splice WHERE id_gis = $1', schema_name) INTO splice_rec USING id_gis_splice;
-    EXECUTE format('SELECT * FROM %I.cw_connectivity_box WHERE ST_Contains(layout_geom, $1)', schema_name, schema_name) INTO cb_rec USING splice_rec.layout_geom;
+    EXECUTE format('SELECT * FROM %I.cw_connectivity_box WHERE ST_Contains(layout_geom, $1)', schema_name) INTO cb_rec USING splice_rec.layout_geom;
 
+    -- Verificar resultados de las consultas
+    RAISE NOTICE 'Cable Record: %', cable_rec;
+    RAISE NOTICE 'Splice Record: %', splice_rec;
+    RAISE NOTICE 'Connectivity Box Record: %', cb_rec;
 
     -- Se genera la linea que conecta el cable cortado en la caja de conexiones con el empalme.
     intersection_point := ST_ClosestPoint(cable_rec.layout_geom, cb_rec.layout_geom);
-	
-    -- Se obtiene la cara del connectivity_box por el que entra ese cable
-    face_1 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 1), (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 2));
-    face_2 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 2), (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 3));
-    face_3 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 3), (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 4));
-    face_4 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 4), (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 5));
 
-    SELECT INTO clossest_face
+    -- Obtener la cara más cercana del connectivity_box
+    face_1 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 1),
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 2)
+    );
+    face_2 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 2),
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 3)
+    );
+    face_3 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 3),
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 4)
+    );
+    face_4 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 4),
+        (SELECT geom FROM ST_DumpPoints(cb_rec.layout_geom) WHERE path[2] = 5)
+    );
+
+    RAISE NOTICE 'Face 1: %', face_1;
+    RAISE NOTICE 'Face 2: %', face_2;
+    RAISE NOTICE 'Face 3: %', face_3;
+    RAISE NOTICE 'Face 4: %', face_4;
+
+    SELECT INTO closest_face
     CASE
         WHEN ST_Distance(face_1, intersection_point) <= LEAST(
             ST_Distance(face_2, intersection_point),
@@ -5392,88 +5414,103 @@ BEGIN
         ) THEN face_3
         ELSE face_4
     END;
-	
-	
-	RAISE NOTICE 'Número de geometrías en closest_face: %', clossest_face;
 
+    RAISE NOTICE 'Closest Face: %', closest_face;
 
-    splice_face_1 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 1), (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 2));
-    splice_face_2 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 2), (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 3));
-    splice_face_3 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 3), (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 4));
-    splice_face_4 := ST_MakeLine((SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 4), (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 5));
-	
-	RAISE NOTICE 'Número de geometrías en splice_face_1: %', splice_face_1;
+    splice_face_1 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 1),
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 2)
+    );
+    splice_face_2 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 2),
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 3)
+    );
+    splice_face_3 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 3),
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 4)
+    );
+    splice_face_4 := ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 4),
+        (SELECT geom FROM ST_DumpPoints(splice_rec.layout_geom) WHERE path[2] = 5)
+    );
 
-    RAISE NOTICE 'Número de geometrías en splice_face_2: %', splice_face_2;
+    RAISE NOTICE 'Splice Face 1: %', splice_face_1;
+    RAISE NOTICE 'Splice Face 2: %', splice_face_2;
+    RAISE NOTICE 'Splice Face 3: %', splice_face_3;
+    RAISE NOTICE 'Splice Face 4: %', splice_face_4;
 
-    RAISE NOTICE 'Número de geometrías en splice_face_3: %', splice_face_3;
-
-    RAISE NOTICE 'Número de geometrías en splcie_face_4: %', splice_face_4;
-
-    RAISE NOTICE 'Número de geometrías en closest_splice: %', clossest_splice_face;
-
-    SELECT INTO clossest_splice_face
+    SELECT INTO closest_splice_face
     CASE
-        WHEN ST_Distance(ST_Centroid(splice_face_1), clossest_face) <= LEAST(
-            ST_Distance(ST_Centroid(splice_face_2), clossest_face),
-            ST_Distance(ST_Centroid(splice_face_3), clossest_face),
-            ST_Distance(ST_Centroid(splice_face_4), clossest_face)
+        WHEN ST_Distance(ST_Centroid(splice_face_1), closest_face) <= LEAST(
+            ST_Distance(ST_Centroid(splice_face_2), closest_face),
+            ST_Distance(ST_Centroid(splice_face_3), closest_face),
+            ST_Distance(ST_Centroid(splice_face_4), closest_face)
         ) THEN splice_face_1
-        WHEN ST_Distance(ST_Centroid(splice_face_2), clossest_face) <= LEAST(
-            ST_Distance(ST_Centroid(splice_face_1), clossest_face),
-            ST_Distance(ST_Centroid(splice_face_3), clossest_face),
-            ST_Distance(ST_Centroid(splice_face_4), clossest_face)
+        WHEN ST_Distance(ST_Centroid(splice_face_2), closest_face) <= LEAST(
+            ST_Distance(ST_Centroid(splice_face_1), closest_face),
+            ST_Distance(ST_Centroid(splice_face_3), closest_face),
+            ST_Distance(ST_Centroid(splice_face_4), closest_face)
         ) THEN splice_face_2
-        WHEN ST_Distance(ST_Centroid(splice_face_3), clossest_face) <= LEAST(
-            ST_Distance(ST_Centroid(splice_face_1), clossest_face),
-            ST_Distance(ST_Centroid(splice_face_2), clossest_face),
-            ST_Distance(ST_Centroid(splice_face_4), clossest_face)
+        WHEN ST_Distance(ST_Centroid(splice_face_3), closest_face) <= LEAST(
+            ST_Distance(ST_Centroid(splice_face_1), closest_face),
+            ST_Distance(ST_Centroid(splice_face_2), closest_face),
+            ST_Distance(ST_Centroid(splice_face_4), closest_face)
         ) THEN splice_face_3
         ELSE splice_face_4
     END;
 
-    RAISE NOTICE 'Número de geometrías en closest_splice: %', clossest_splice_face;
+    RAISE NOTICE 'Closest Splice Face: %', closest_splice_face;
 
-    -- Por distancias a la cara por la que entra el cable se saca la cara del sheath_splice mas cercana a la cara del connectivity_box
-    face_points := (SELECT ST_LineInterpolatePoints(clossest_splice_face, 0.07, true));
+    -- Por distancias a la cara por la que entra el cable se saca la cara del sheath_splice más cercana a la cara del connectivity_box
+    face_points := ST_LineInterpolatePoints(closest_splice_face, 0.07, true);
 
-    RAISE NOTICE 'Número de geometrías en face_points: %', face_points;
+    RAISE NOTICE 'Face Points: %', face_points;
 
     -- Se obtienen la cantidad de cables que han pasado dentro de la connectivity_box para saber que ruta deberá coger el nuevo cable
-    EXECUTE format('SELECT count(*) FROM %I.fo_cable WHERE ST_Length(ST_Intersection(layout_geom, $1)) > 0.0005 AND ST_Intersects(layout_geom, $2)', schema_name) INTO n_cables_crossing USING cb_rec.layout_geom, clossest_face;
+    EXECUTE format('SELECT count(*) FROM %I.fo_cable WHERE ST_Length(ST_Intersection(layout_geom, $1)) > 0.0005 AND ST_Intersects(layout_geom, $2)', schema_name) INTO n_cables_crossing USING cb_rec.layout_geom, closest_face;
+
+    RAISE NOTICE 'Number of cables crossing: %', n_cables_crossing;
 
     IF n_cables_crossing < 20 THEN
         -- Se genera el camino que seguirá el cable
-        clossest_face := ST_OffsetCurve(clossest_face, -width * (n_cables_crossing + 1), 'quad_segs=4 join=mitre mitre_limit=2.2');
+        closest_face := ST_OffsetCurve(closest_face, -width * (n_cables_crossing + 1), 'quad_segs=4 join=mitre mitre_limit=2.2');
 
-        RAISE NOTICE 'Número de geometrías en face_points: %', ST_NumGeometries(face_points);
+        RAISE NOTICE 'Adjusted Closest Face: %', closest_face;
 
         -- Dependiendo de si es un cable de entrada o salida se genera la línea de conexión en una dirección u otra
         FOR i IN REVERSE 12..ST_NumGeometries(face_points)-12 LOOP
             EXECUTE format('SELECT count(*) FROM %I.fo_cable WHERE ST_Distance(ST_GeometryN($1, $2), layout_geom) < 0.0005', schema_name) INTO dist USING face_points, i;
-			IF dist = 0
-            THEN
+            IF dist = 0 THEN
                 IF ST_Distance(ST_EndPoint(cable_rec.layout_geom), cb_rec.layout_geom) < 0.0005 THEN
-                    aux_line_guitar_splice := ST_ShortestLine(clossest_face, ST_GeometryN(face_points, i));
-                    aux_line_cable_guitar := ST_ShortestLine(cable_rec.layout_geom, clossest_face);
-                    EXECUTE format('UPDATE %I.fo_cable SET layout_geom = ST_LineMerge(ST_MakeLine(ST_MakeLine(ST_MakeLine($1, $2), ST_ShortestLine($2, $3)), $3)) WHERE id_gis = $4', schema_name) USING cable_rec.layout_geom, aux_line_cable_guitar, aux_line_guitar_splice, id_gis_cable;
+                    aux_line_guitar_splice := ST_ShortestLine(closest_face, ST_GeometryN(face_points, i));
+                    aux_line_cable_guitar := ST_ShortestLine(cable_rec.layout_geom, closest_face);
+                    EXECUTE format(
+                        'UPDATE %I.fo_cable SET layout_geom = ST_LineMerge(ST_MakeLine(ST_MakeLine(ST_MakeLine($1, $2), ST_ShortestLine($2, $3)), $3)) WHERE id_gis = $4',
+                        schema_name
+                    ) USING cable_rec.layout_geom, aux_line_cable_guitar, aux_line_guitar_splice, id_gis_cable;
                     EXIT;
-                ELSE	
-                    aux_line_guitar_splice := ST_ShortestLine(ST_GeometryN(face_points, i), clossest_face);
-                    aux_line_cable_guitar := ST_ShortestLine(clossest_face, cable_rec.layout_geom);
-                    EXECUTE format('UPDATE %I.fo_cable SET layout_geom = ST_LineMerge(ST_MakeLine($1, ST_MakeLine(ST_ShortestLine($1, $2), ST_MakeLine($2, $3)))) WHERE id_gis = $4', schema_name) USING aux_line_guitar_splice, aux_line_cable_guitar, cable_rec.layout_geom, id_gis_cable;
+                ELSE    
+                    aux_line_guitar_splice := ST_ShortestLine(ST_GeometryN(face_points, i), closest_face);
+                    aux_line_cable_guitar := ST_ShortestLine(closest_face, cable_rec.layout_geom);
+                    EXECUTE format(
+                        'UPDATE %I.fo_cable SET layout_geom = ST_LineMerge(ST_MakeLine($1, ST_MakeLine(ST_ShortestLine($1, $2), ST_MakeLine($2, $3)))) WHERE id_gis = $4',
+                        schema_name
+                    ) USING aux_line_guitar_splice, aux_line_cable_guitar, cable_rec.layout_geom, id_gis_cable;
                     EXIT;
                 END IF;
             END IF;
         END LOOP;
     END IF;
 
-    EXECUTE format('SELECT * FROM %I.fo_cable WHERE id_gis = $1', schema_name) INTO cable_rec USING id_gis_cable;
-    -- Llamada a la función update_fo_fiber_to_splice para actualizar las fibras del cable al empalme
-EXECUTE format('SELECT public.update_fo_fiber_to_splice($1, $2, $3)', schema_name, cable_rec.id_gis, cable_rec.layout_geom) USING  schema_name, cable_rec.id_gis, cable_rec.layout_geom;
+    -- Actualiza las fibras del cable al empalme
+    EXECUTE format(
+        'SELECT public.update_fo_fiber_to_splice($1, $2, $3)',
+        schema_name
+    ) USING schema_name, cable_rec.id_gis, cable_rec.layout_geom;
 END;
 $$
 LANGUAGE plpgsql;
+
 
 
 ---------------------------------------------------------------------------------------------------------------------------------
@@ -7270,6 +7307,7 @@ call create_branch('pruebaProyect', 'fe2ddf89-87ae-4b29-8123-63782d2c8635')
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
++
 --PROCEDIMIENTO DE DELETE
 CREATE OR REPLACE PROCEDURE delete_point_object(
     IN schema_name TEXT,
@@ -7357,7 +7395,7 @@ LANGUAGE plpgsql;
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION insert_ont_on_client(schema_name TEXT, id_gis_client VARCHAR) RETURNS VOID AS 
+CREATE OR REPLACE FUNCTION insert_ont_on_client(schema_name TEXT, id_gis_client VARCHAR, edited_by UUID) RETURNS VOID AS 
 $$
 DECLARE
     ont_count INTEGER;
@@ -7374,9 +7412,9 @@ BEGIN
     -- Insertar un nuevo registro si el conteo es menor que 10
     IF ont_count < 10 THEN
         EXECUTE format('
-            INSERT INTO %I.optical_network_terminal(geom)
-            VALUES ((SELECT geom FROM %I.cw_client WHERE id_gis = $1))',
-            schema_name, schema_name)
+            INSERT INTO %I.optical_network_terminal(geom, edited_by)
+            VALUES ((SELECT geom FROM %I.cw_client WHERE id_gis = $1), %L)',
+            schema_name, schema_name, edited_by)
         USING id_gis_client;
     END IF;
 END;
@@ -7389,8 +7427,9 @@ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION insert_client_on_floor(
     schema_name TEXT, 
-    id_gis_floor VARCHAR
-) RETURNS VOID AS 
+    id_gis_floor VARCHAR,
+    edited_by UUID
+) RETURNS VOID AS
 $$
 DECLARE
     current_floor RECORD;
@@ -7453,23 +7492,23 @@ BEGIN
 
         IF client_count = 0 THEN
             EXECUTE format('
-                INSERT INTO %I.cw_client(geom, layout_geom)
+                INSERT INTO %I.cw_client(geom, layout_geom, edited_by)
                 VALUES (
                     $1,
                     ST_Rotate(
                         ST_MakeEnvelope(
-                            ST_X($1) - $2 / 2 + 0.03,  
-                            ST_Y($1) - $3 + 0.36,   
+                            ST_X($1) - $2 / 2 + 0.03, 
+                            ST_Y($1) - $3 + 0.36,
                             ST_X($1) + $2 / 2 - 0.03,  
                             ST_Y($1) + $3,   
                             ST_SRID($1)
                         ),
                         $4,
                         $1
-                    )
+                    ),
+                    $5
                 )', schema_name)
-            USING ST_GeometryN(central_clients_line_points, pos), clients_distance, floor_height, current_building.rotate_rads;
-
+            USING ST_GeometryN(central_clients_line_points, pos), clients_distance, floor_height, current_building.rotate_rads, edited_by;
             EXIT;
         END IF;
     END LOOP;
@@ -7477,7 +7516,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-
 
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
@@ -7676,84 +7714,345 @@ LANGUAGE plpgsql;
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-
-CREATE OR REPLACE FUNCTION connect_objects(schema_name TEXT, id_gis_object_1 VARCHAR, id_gis_object_2 VARCHAR) RETURNS void
+CREATE OR REPLACE FUNCTION connect_objects(
+    schema_name TEXT, 
+    id_gis_object_1 VARCHAR, 
+    id_gis_object_2 VARCHAR
+) RETURNS void
 AS
-	$$
-	DECLARE
-		object_1 VARCHAR;
-		object_2 VARCHAR;
-		char_array TEXT[];
-	BEGIN
-		char_array := STRING_TO_ARRAY(id_gis_object_1, '_');
-    	object_1 := char_array[1];
+$$
+DECLARE
+    object_1 VARCHAR;
+    object_2 VARCHAR;
+    char_array TEXT[];
+BEGIN
+    -- Parsing the first object ID
+    char_array := STRING_TO_ARRAY(id_gis_object_1, '_');
+    object_1 := char_array[1];
+    FOR i IN 2..array_length(char_array, 1)-1 LOOP
+        object_1 := CONCAT(object_1, '_', char_array[i]);
+    END LOOP;
 
-		FOR i IN 2..array_length(char_array, 1)-1
-		LOOP
-			object_1 := CONCAT(CONCAT(object_1, '_'), char_array[i]);
-		END LOOP;
+    -- Parsing the second object ID
+    char_array := STRING_TO_ARRAY(id_gis_object_2, '_');
+    object_2 := char_array[1];
+    FOR i IN 2..array_length(char_array, 1)-1 LOOP
+        object_2 := CONCAT(object_2, '_', char_array[i]);
+    END LOOP;
 
-		char_array := STRING_TO_ARRAY(id_gis_object_2, '_');
-    	object_2 := char_array[1];
+    -- Debugging output
+    RAISE NOTICE 'Object 1: %', object_1;
+    RAISE NOTICE 'Object 2: %', object_2;
 
-		FOR i IN 2..array_length(char_array, 1)-1
-		LOOP
-			object_2 := CONCAT(CONCAT(object_2, '_'), char_array[i]);
-		END LOOP;
+    -- Handling different cases
+    CASE
+        WHEN object_1 = 'fo_cable' AND object_2 = 'fo_splice' THEN
+            PERFORM connect_cable(id_gis_object_1, id_gis_object_2, schema_name);
+        WHEN object_1 = 'fo_splice' AND object_2 = 'fo_cable' THEN
+            PERFORM connect_cable(id_gis_object_2, id_gis_object_1, schema_name);
+        WHEN object_1 = 'fo_fiber' AND object_2 = 'fo_fiber' THEN
+            PERFORM connect_fiber(id_gis_object_1, id_gis_object_2, schema_name);
+        WHEN object_1 = 'fo_fiber' AND (object_2 = 'in_port' OR object_2 = 'out_port') THEN
+            PERFORM connect_fiber_splitter_port(schema_name, id_gis_object_1, id_gis_object_2);                
+        WHEN (object_1 = 'in_port' OR object_1 = 'out_port') AND object_2 = 'fo_fiber' THEN
+            PERFORM connect_fiber_splitter_port(schema_name, id_gis_object_2, id_gis_object_1);
+        WHEN object_1 = 'fo_splice' AND object_2 = 'cw_client' THEN
+            PERFORM connect_splice_client(schema_name, id_gis_object_1, id_gis_object_2);
+        WHEN object_1 = 'cw_client' AND object_2 = 'fo_splice' THEN
+            PERFORM connect_splice_client(schema_name, id_gis_object_2, id_gis_object_1);
+        WHEN object_1 = 'fo_splice' AND object_2 = 'fo_splice' THEN
+            PERFORM connect_splice_splice(schema_name, id_gis_object_2, id_gis_object_1);
+        WHEN object_1 = 'fo_fiber' AND object_2 = 'optical_network_terminal' THEN
+            PERFORM connect_fiber_ont(schema_name, id_gis_object_1, id_gis_object_2);
+        WHEN object_1 = 'optical_network_terminal' AND object_2 = 'fo_fiber' THEN
+            PERFORM connect_fiber_ont(schema_name, id_gis_object_2, id_gis_object_1);
+        WHEN object_1 = 'fo_splice' AND object_2 = 'rack' THEN
+            PERFORM connect_splice_rack(schema_name, id_gis_object_1, id_gis_object_2);
+        WHEN object_1 = 'rack' AND object_2 = 'fo_splice' THEN
+            PERFORM connect_splice_rack(schema_name, id_gis_object_2, id_gis_object_1);    
+        WHEN object_1 = 'fo_fiber' AND object_2 = 'port' THEN
+            PERFORM connect_fiber_building_port(schema_name, id_gis_object_1, id_gis_object_2);
+        WHEN object_1 = 'port' AND object_2 = 'fo_fiber' THEN
+            PERFORM connect_fiber_building_port(schema_name, id_gis_object_2, id_gis_object_1);    
+        WHEN object_1 = 'fo_cable' AND object_2 = 'rack' THEN
+            PERFORM connect_cable_rack(schema_name, id_gis_object_1, id_gis_object_2);    
+        WHEN object_1 = 'rack' AND object_2 = 'fo_cable' THEN
+            PERFORM connect_cable_rack(schema_name, id_gis_object_2, id_gis_object_1);                    
+        ELSE
+            RAISE NOTICE 'No matching case for objects % and %', object_1, object_2;
+    END CASE;
+END;
+$$
+LANGUAGE plpgsql;
 
-		CASE
-			WHEN object_1 = 'fo_cable' AND object_2 = 'fo_splice'
-			THEN
-				PERFORM connect_cable(schema_name, id_gis_object_1, id_gis_object_2);
-			WHEN object_1 = 'fo_splice' AND object_2 = 'fo_cable'
-			THEN
-				PERFORM connect_cable(schema_name, id_gis_object_2, id_gis_object_1);
-			WHEN object_1 = 'fo_fiber' AND object_2 = 'fo_fiber'
-			THEN
-				PERFORM connect_fiber(schema_name, id_gis_object_1, id_gis_object_2);
-			WHEN object_1 = 'fo_fiber' AND (object_2 = 'in_port' OR object_2 = 'out_port')
-			THEN
-				PERFORM connect_fiber_splitter_port(schema_name, id_gis_object_1, id_gis_object_2);				
-			WHEN (object_1 = 'in_port' OR object_1 = 'out_port') AND object_2 = 'fo_fiber'
-			THEN
-				PERFORM connect_fiber_splitter_port(schema_name, id_gis_object_2, id_gis_object_1);
-			WHEN object_1 = 'fo_splice' AND object_2 = 'cw_client'
-			THEN
-				PERFORM connect_splice_client(schema_name, id_gis_object_1, id_gis_object_2);
-			WHEN object_1 = 'cw_client' AND object_2 = 'fo_splice'
-			THEN
-				PERFORM connect_splice_client(schema_name, id_gis_object_2, id_gis_object_1);
-			WHEN object_1 = 'fo_splice' AND object_2 = 'fo_splice'
-			THEN
-				PERFORM connect_splice_splice(schema_name, id_gis_object_2, id_gis_object_1);
-			WHEN object_1 = 'fo_fiber' AND object_2 = 'optical_network_terminal'
-			THEN
-				PERFORM connect_fiber_ont(schema_name, id_gis_object_1, id_gis_object_2);
-			WHEN object_1 = 'optical_network_terminal' AND object_2 = 'fo_fiber'
-			THEN
-				PERFORM connect_fiber_ont(schema_name, id_gis_object_2, id_gis_object_1);
-			WHEN object_1 = 'fo_splice' AND object_2 = 'rack'
-			THEN
-				PERFORM connect_splice_rack(schema_name, id_gis_object_1, id_gis_object_2);
-			WHEN object_1 = 'rack' AND object_2 = 'fo_splice'
-			THEN
-				PERFORM connect_splice_rack(schema_name, id_gis_object_2, id_gis_object_1);	
-			WHEN object_1 = 'fo_fiber' AND object_2 = 'port'
-			THEN
-				PERFORM connect_fiber_building_port(schema_name, id_gis_object_1, id_gis_object_2);
-			WHEN object_1 = 'port' AND object_2 = 'fo_fiber'
-			THEN
-				PERFORM connect_fiber_building_port(schema_name, id_gis_object_2, id_gis_object_1);	
-			WHEN object_1 = 'fo_cable' AND object_2 = 'rack'
-			THEN
-				PERFORM connect_cable_rack(schema_name, id_gis_object_1, id_gis_object_2);	
-			WHEN object_1 = 'rack' AND object_2 = 'fo_cable'
-			THEN
-				PERFORM connect_cable_rack(schema_name, id_gis_object_2, id_gis_object_1);					
-			ELSE
-		END CASE;
-	END;
-	$$
+
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION connect_fiber_splitter_port(
+    schema_name TEXT,
+    id_gis_fiber VARCHAR,
+    id_gis_port VARCHAR
+) RETURNS void
+AS
+$$
+DECLARE
+    fiber_rec RECORD;
+    fo_splice_rec RECORD;
+    port_rec RECORD;
+    input_fiber RECORD;
+    output_fiber RECORD;
+    face_1 GEOMETRY;
+    face_2 GEOMETRY;
+    face_3 GEOMETRY;
+    face_4 GEOMETRY;
+    clossest_input_face GEOMETRY;
+    clossest_output_face GEOMETRY;
+    input_fiber_to_face GEOMETRY;
+    output_fiber_point GEOMETRY;
+    input_fiber_point GEOMETRY;
+    new_input_geom GEOMETRY;
+    faces_intersection_point GEOMETRY;
+    second_closest_input_face GEOMETRY;
+    second_closest_output_face GEOMETRY;
+    input_faces_intersection_point GEOMETRY;
+    output_fiber_to_face GEOMETRY;
+    new_output_geom GEOMETRY;
+    output_faces_intersection_point GEOMETRY;
+    n_guitar_lines INTEGER;
+    width FLOAT;
+    in_port_count INTEGER;
+    out_port_count INTEGER;
+BEGIN
+    width = 0.0000375;
+    n_guitar_lines = 1000;
+
+    -- Obtener el registro de fibra
+    EXECUTE format('SELECT * FROM %I.fo_fiber WHERE id_gis = $1', schema_name)
+    INTO fiber_rec
+    USING id_gis_fiber;
+
+    -- Obtener el count(*) de los puertos de entrada
+    EXECUTE format('SELECT count(*) FROM %I.in_port WHERE id_gis = $1', schema_name)
+    INTO in_port_count
+    USING id_gis_port;
+
+    -- Obtener el count(*) de los puertos de salida
+    EXECUTE format('SELECT count(*) FROM %I.out_port WHERE id_gis = $1', schema_name)
+    INTO out_port_count
+    USING id_gis_port;
+
+    -- Obtener el registro de puerto basado en los counts
+    IF in_port_count > 0 THEN
+        EXECUTE format('SELECT * FROM %I.in_port WHERE id_gis = $1', schema_name)
+        INTO port_rec
+        USING id_gis_port;
+    ELSE
+        EXECUTE format('SELECT * FROM %I.out_port WHERE id_gis = $1', schema_name)
+        INTO port_rec
+        USING id_gis_port;
+    END IF;
+
+    -- Obtener el registro de empalme
+    EXECUTE format('SELECT * FROM %I.fo_splice WHERE ST_Intersects(layout_geom, $1)', schema_name)
+    INTO fo_splice_rec
+    USING port_rec.geom;
+
+    -- Determinar si la fibra es de entrada o salida
+    IF ST_Distance(ST_StartPoint(fiber_rec.layout_geom), fo_splice_rec.layout_geom) < 0.005 THEN
+        output_fiber = fiber_rec;
+        output_fiber_point = ST_StartPoint(fiber_rec.layout_geom);
+    ELSE
+        input_fiber = fiber_rec;
+        input_fiber_point = ST_EndPoint(fiber_rec.layout_geom);
+    END IF;
+
+    -- Inicializar las 4 caras del offset
+    face_1 = ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 1),
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 2)
+    );
+    face_2 = ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 2),
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 3)
+    );
+    face_3 = ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 3),
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 4)
+    );
+    face_4 = ST_MakeLine(
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 4),
+        (SELECT geom FROM ST_DumpPoints(fo_splice_rec.layout_geom) WHERE path[2] = 5)
+    );
+
+    -- Obtener el carril para la conexión
+    FOR i IN 0..1000 LOOP
+        IF (ST_Distance(port_rec.geom, ST_OffsetCurve(face_2, -width * (n_guitar_lines + i), 'quad_segs=4 join=round')) < 0.000025) THEN
+            n_guitar_lines = n_guitar_lines + i;
+            EXIT;
+        END IF;
+    END LOOP;
+
+    IF input_fiber_point IS NOT NULL THEN
+        -- Obtener la cara más cercana al punto de entrada
+        SELECT INTO clossest_input_face
+        CASE
+            WHEN ST_Distance(face_1, input_fiber_point) <= LEAST(
+                ST_Distance(face_2, input_fiber_point),
+                ST_Distance(face_3, input_fiber_point),
+                ST_Distance(face_4, input_fiber_point)
+            ) THEN face_1
+            WHEN ST_Distance(face_2, input_fiber_point) <= LEAST(
+                ST_Distance(face_1, input_fiber_point),
+                ST_Distance(face_3, input_fiber_point),
+                ST_Distance(face_4, input_fiber_point)
+            ) THEN face_2
+            WHEN ST_Distance(face_3, input_fiber_point) <= LEAST(
+                ST_Distance(face_1, input_fiber_point),
+                ST_Distance(face_2, input_fiber_point),
+                ST_Distance(face_4, input_fiber_point)
+            ) THEN face_3
+            ELSE face_4
+        END;
+    ELSE
+        -- Obtener la cara más cercana al punto de salida
+        SELECT INTO clossest_output_face
+        CASE
+            WHEN ST_Distance(face_1, output_fiber_point) <= LEAST(
+                ST_Distance(face_2, output_fiber_point),
+                ST_Distance(face_3, output_fiber_point),
+                ST_Distance(face_4, output_fiber_point)
+            ) THEN face_1
+            WHEN ST_Distance(face_2, output_fiber_point) <= LEAST(
+                ST_Distance(face_1, output_fiber_point),
+                ST_Distance(face_3, output_fiber_point),
+                ST_Distance(face_4, output_fiber_point)
+            ) THEN face_2
+            WHEN ST_Distance(face_3, output_fiber_point) <= LEAST(
+                ST_Distance(face_1, output_fiber_point),
+                ST_Distance(face_2, output_fiber_point),
+                ST_Distance(face_4, output_fiber_point)
+            ) THEN face_3
+            ELSE face_4
+        END;
+    END IF;
+
+    face_2 = ST_OffsetCurve(face_2, -width * n_guitar_lines, 'quad_segs=4 join=round');
+
+    IF clossest_input_face IS NOT NULL THEN
+        clossest_input_face = ST_OffsetCurve(clossest_input_face, -width * n_guitar_lines, 'quad_segs=4 join=round');
+        IF clossest_input_face = face_2 THEN
+            input_fiber_to_face = ST_ShortestLine(input_fiber_point, clossest_input_face);
+            new_input_geom = ST_LineMerge(
+                ST_MakeLine(
+                    ST_MakeLine(fiber_rec.layout_geom, input_fiber_to_face),
+                    port_rec.geom
+                )
+            );
+        ELSIF ST_Intersects(clossest_input_face, face_2) THEN
+            faces_intersection_point = ST_Intersection(clossest_input_face, face_2);
+            input_fiber_to_face = ST_ShortestLine(input_fiber_point, clossest_input_face);
+            new_input_geom = ST_LineMerge(
+                ST_MakeLine(
+                    ST_MakeLine(
+                        ST_MakeLine(fiber_rec.layout_geom, input_fiber_to_face),
+                        faces_intersection_point
+                    ),
+                    port_rec.geom
+                )
+            );
+        ELSE
+            WITH distances AS (
+                SELECT
+                    unnest(ARRAY[face_1, face_2, face_3, face_4]) AS face,
+                    ST_Distance(unnest(ARRAY[face_1, face_2, face_3, face_4]), input_fiber_point) AS distance
+            )
+            SELECT face INTO second_closest_input_face
+            FROM (
+                SELECT face, ROW_NUMBER() OVER (ORDER BY distance) AS rn
+                FROM distances
+            ) ranked_distances
+            WHERE rn = 2;
+
+            second_closest_input_face = ST_OffsetCurve(second_closest_input_face, -width * n_guitar_lines, 'quad_segs=4 join=round');
+            input_fiber_to_face = ST_ShortestLine(input_fiber_point, clossest_input_face);
+            input_faces_intersection_point = ST_Intersection(second_closest_input_face, clossest_input_face);
+            faces_intersection_point = ST_Intersection(second_closest_input_face, face_2);
+            new_input_geom = ST_LineMerge(
+                ST_MakeLine(
+                    ST_MakeLine(
+                        ST_MakeLine(
+                            ST_MakeLine(fiber_rec.layout_geom, input_fiber_to_face),
+                            input_faces_intersection_point
+                        ),
+                        faces_intersection_point
+                    ),
+                    port_rec.geom
+                )
+            );
+        END IF;
+        EXECUTE format('UPDATE %I.fo_fiber SET layout_geom = $1, source = NULL, target = NULL WHERE id_gis = $2', schema_name)
+        USING new_input_geom, input_fiber.id_gis;
+    END IF;
+
+    IF output_fiber_point IS NOT NULL THEN
+        clossest_output_face = ST_OffsetCurve(clossest_output_face, -width * n_guitar_lines, 'quad_segs=4 join=round');
+        IF clossest_output_face = face_2 THEN
+            output_fiber_to_face = ST_ShortestLine(clossest_output_face, output_fiber_point);
+            new_output_geom = ST_LineMerge(
+                ST_MakeLine(
+                    port_rec.geom,
+                    ST_MakeLine(output_fiber_to_face, fiber_rec.layout_geom)
+                )
+            );
+        ELSIF ST_Intersects(clossest_output_face, face_2) THEN
+            faces_intersection_point = ST_Intersection(clossest_output_face, face_2);
+            output_fiber_to_face = ST_ShortestLine(clossest_output_face, output_fiber_point);
+            new_output_geom = ST_LineMerge(
+                ST_MakeLine(
+                    port_rec.geom,
+                    ST_MakeLine(
+                        faces_intersection_point,
+                        ST_MakeLine(output_fiber_to_face, fiber_rec.layout_geom)
+                    )
+                )
+            );
+        ELSE
+            WITH distances AS (
+                SELECT
+                    unnest(ARRAY[face_1, face_2, face_3, face_4]) AS face,
+                    ST_Distance(unnest(ARRAY[face_1, face_2, face_3, face_4]), output_fiber_point) AS distance
+            )
+            SELECT face INTO second_closest_output_face
+            FROM (
+                SELECT face, ROW_NUMBER() OVER (ORDER BY distance) AS rn
+                FROM distances
+            ) ranked_distances
+            WHERE rn = 2;
+
+            second_closest_output_face = ST_OffsetCurve(second_closest_output_face, -width * n_guitar_lines, 'quad_segs=4 join=round');
+            output_fiber_to_face = ST_ShortestLine(clossest_output_face, output_fiber_point);
+            output_faces_intersection_point = ST_Intersection(second_closest_output_face, clossest_output_face);
+            faces_intersection_point = ST_Intersection(second_closest_output_face, face_2);
+            new_output_geom = ST_LineMerge(
+                ST_MakeLine(
+                    port_rec.geom,
+                    ST_MakeLine(
+                        faces_intersection_point,
+                        ST_MakeLine(
+                            output_faces_intersection_point,
+                            ST_MakeLine(output_fiber_to_face, fiber_rec.layout_geom)
+                        )
+                    )
+                )
+            );
+        END IF;
+        EXECUTE format('UPDATE %I.fo_fiber SET layout_geom = $1, source = NULL, target = NULL WHERE id_gis = $2', schema_name)
+        USING new_output_geom, output_fiber.id_gis;
+    END IF;
+END;
+$$
 LANGUAGE plpgsql;
 
 
@@ -7987,6 +8286,7 @@ DECLARE
     n_cables INTEGER;
     n_cables_rack INTEGER;
     new_cable_layout_geom GEOMETRY;
+    r RECORD;  -- Temporary record for cursor fetching
 BEGIN
     -- Obtener registros de rack, empalme y ubicación
     EXECUTE format('SELECT * FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_record USING id_gis_rack;
@@ -8030,6 +8330,9 @@ BEGIN
             ] FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_faces_array USING id_gis_rack;
 
     -- Cara de entrada
+    min_distance := NULL;
+    closest_location_face := NULL;
+    
     FOR e IN 1..array_length(location_faces_array,1) LOOP
         IF min_distance IS NULL OR ST_Distance(location_faces_array[e], cable_record.layout_geom) < min_distance THEN
             min_distance := ST_Distance(location_faces_array[e], cable_record.layout_geom);
@@ -8038,6 +8341,9 @@ BEGIN
     END LOOP;    
 
     -- Cara de subida de cables
+    min_distance := NULL;
+    rise_location_face := NULL;
+    
     FOR e IN 1..array_length(location_faces_array,1) LOOP
         EXECUTE format('SELECT COUNT(*) FROM %I.rack WHERE ST_Distance(layout_geom, $1) < 0.06', schema_name) INTO cont USING location_faces_array[e];
 
@@ -8049,10 +8355,13 @@ BEGIN
             rise_location_face := location_faces_array[e];
         END IF;
     END LOOP;
-    
+
     min_distance := NULL;
 
     -- Cara de entrada de las racks
+    min_distance := NULL;
+    in_rack_face := NULL;
+    
     FOR e IN 1..array_length(rack_faces_array,1) LOOP
         IF min_distance IS NULL OR ST_Distance(ST_Centroid(rack_faces_array[e]), closest_location_face) < min_distance THEN
             min_distance := ST_Distance(ST_Centroid(rack_faces_array[e]), closest_location_face);
@@ -8070,9 +8379,11 @@ BEGIN
         WHERE ST_Distance(layout_geom, ST_LineExtend($1, 0.50, 0.50)) < 0.001 
             AND ST_Intersects(layout_geom, $2)', schema_name) INTO current_rack_record USING in_rack_face, location_record.layout_geom;
 
-    FOR current_rack_record IN SELECT * FROM %I.rack 
-        WHERE ST_Distance(layout_geom, ST_LineExtend(in_rack_face, 0.50, 0.50)) < 0.001 
-            AND ST_Intersects(layout_geom, location_record.layout_geom) LOOP
+    FOR current_rack_record IN
+        EXECUTE format('SELECT * FROM %I.rack 
+            WHERE ST_Distance(layout_geom, ST_LineExtend($1, 0.50, 0.50)) < 0.001 
+                AND ST_Intersects(layout_geom, $2)', schema_name) USING in_rack_face, location_record.layout_geom
+    LOOP
         EXECUTE format('SELECT COUNT(*) FROM %I.fo_cable WHERE ST_Distance(layout_geom, $1) < 0.001', schema_name) INTO cont USING current_rack_record.layout_geom;
 
         IF cont > 0 THEN
@@ -8121,6 +8432,7 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
@@ -8681,9 +8993,9 @@ LANGUAGE plpgsql;
 -------------------------------------------------------------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION connect_fiber_building_port(
+    schema_name TEXT,
     id_gis_fiber VARCHAR,
-    id_gis_port VARCHAR,
-    schema_name VARCHAR
+    id_gis_port VARCHAR
 ) RETURNS VOID AS 
 $$
 DECLARE
@@ -8872,11 +9184,344 @@ LANGUAGE plpgsql;
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
-SELECT insert_fo_splice_on_building('objects','cw_building_2', 1);
+
+CREATE OR REPLACE FUNCTION connect_cable_rack(schema_name TEXT, id_gis_cable VARCHAR, id_gis_rack VARCHAR) RETURNS VOID AS 
+$$
+DECLARE
+    cable_record RECORD;
+    rack_record RECORD;
+    location_record RECORD;
+    building_record RECORD;
+    floor_record RECORD;
+    current_cable RECORD;
+    new_cable_layout_geom GEOMETRY;
+    building_faces_array GEOMETRY[];
+    floor_faces_array GEOMETRY[];
+    location_faces_array GEOMETRY[];
+    rack_faces_array GEOMETRY[];
+    building_bottom_line GEOMETRY;
+    building_bottom_guitar_line GEOMETRY;
+    building_up_line GEOMETRY;
+    building_up_guitar_line GEOMETRY;
+    floor_bottom_line GEOMETRY;
+    floor_bottom_guitar_line GEOMETRY;
+    floor_up_line GEOMETRY;
+    floor_up_guitar_line GEOMETRY;
+    floor_up_line_points GEOMETRY;
+    location_bottom_line GEOMETRY;
+    location_up_line GEOMETRY;
+    aux_line GEOMETRY;
+    location_face_points GEOMETRY;
+    location_up_guitar_line GEOMETRY;
+    location_bottom_guitar_line GEOMETRY;
+    rack_in_line GEOMETRY;
+    rack_in_guitar_line GEOMETRY;
+    min_distance FLOAT;
+    pos INTEGER;
+    pos_floor INTEGER;
+    encontrado BOOLEAN;
+    count_cable INTEGER;
+    count_splice INTEGER;
+    count_rack INTEGER;
+    count_location INTEGER;
+    count_floor INTEGER;
+    count_cable_2 INTEGER;
+    count_cable_3 INTEGER;
+    count_cable_4 INTEGER;
+    count_cable_5 INTEGER;
+BEGIN
+    -- Obtener el registro del cable
+    EXECUTE format('SELECT * FROM %I.fo_cable WHERE id_gis = $1', schema_name) INTO cable_record USING id_gis_cable;
+    
+    -- Obtener el registro del rack
+    EXECUTE format('SELECT * FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_record USING id_gis_rack;
+    
+    -- Obtener el registro del edificio
+    EXECUTE format('SELECT * FROM %I.cw_building WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO building_record USING rack_record.layout_geom;
+    
+    -- Obtener el registro de la ubicación
+    EXECUTE format('SELECT * FROM %I.cw_client WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO location_record USING rack_record.layout_geom;
+    
+    -- Obtener el registro del piso
+    EXECUTE format('SELECT * FROM %I.cw_floor WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO floor_record USING rack_record.layout_geom;
+
+    IF location_record IS NULL THEN
+        -- Obtener el registro de la sala si no hay ubicación
+        EXECUTE format('SELECT * FROM %I.cw_room WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO location_record USING rack_record.layout_geom;
+    END IF;
+
+    -- Obtener las caras del edificio
+    EXECUTE format('SELECT ARRAY[
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=1), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=5))
+        ] FROM %I.cw_building WHERE id_gis = $1', schema_name) INTO building_faces_array USING building_record.id_gis;
+    
+    -- Obtener las caras del piso
+    EXECUTE format('SELECT ARRAY[
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=1), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=5))
+        ] FROM %I.cw_floor WHERE id_gis = $1', schema_name) INTO floor_faces_array USING floor_record.id_gis;
+
+    -- Obtener las caras de la ubicación
+    EXECUTE format('SELECT ARRAY[
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=1), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=5))
+        ] FROM %I.cw_client WHERE id_gis = $1', schema_name) INTO location_faces_array USING location_record.id_gis;
+
+    -- Obtener las caras del rack
+    EXECUTE format('SELECT ARRAY[
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=1), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4), 
+                (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=5))
+        ] FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_faces_array USING rack_record.id_gis;
+
+    -- Obtener el conteo de cables
+    EXECUTE format('SELECT COUNT(*) FROM %I.fo_cable WHERE ST_Distance(layout_geom, $1) < 0.0003', schema_name) INTO count_cable USING building_record.layout_geom;
+
+    -- Obtener el conteo de splices
+    EXECUTE format('SELECT COUNT(*) FROM %I.fo_splice WHERE ST_Distance(layout_geom, $1) < 0.0003', schema_name) INTO count_splice USING building_record.layout_geom;
+
+    -- Obtener el conteo de racks
+    EXECUTE format('SELECT COUNT(*) FROM %I.rack WHERE ST_Distance(layout_geom, $1) < 0.0003', schema_name) INTO count_rack USING building_record.layout_geom;
+
+    -- Obtener el conteo de ubicaciones
+    EXECUTE format('SELECT COUNT(*) FROM %I.cw_client WHERE ST_Distance(layout_geom, $1) < 0.0003', schema_name) INTO count_location USING building_record.layout_geom;
+
+    -- Obtener el conteo de pisos
+    EXECUTE format('SELECT COUNT(*) FROM %I.cw_floor WHERE ST_Distance(layout_geom, $1) < 0.0003', schema_name) INTO count_floor USING building_record.layout_geom;
+
+    -- Determinar la posición del cable
+    pos := count_cable + 1;
+
+    -- Determinar la posición del piso
+    EXECUTE format('SELECT COUNT(*) FROM %I.fo_cable WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO count_cable_2 USING floor_record.layout_geom;
+    pos_floor := count_cable + 1;
+
+    -- Generar las líneas de la guitarra
+    building_bottom_guitar_line := ST_OffsetCurve(building_bottom_line, -0.5 + (-0.0125 * pos), 'quad_segs=4 join=mitre mitre_limit=2.2');
+    building_up_guitar_line := ST_OffsetCurve(building_up_line, -1 + (-0.0125 * pos), 'quad_segs=4 join=mitre mitre_limit=2.2');
+
+    floor_up_guitar_line := ST_OffsetCurve(floor_up_line, -0.0075 * pos_floor, 'quad_segs=4 join=mitre mitre_limit=2.2');
+    floor_bottom_guitar_line := ST_OffsetCurve(floor_bottom_line, -0.0075 * pos_floor, 'quad_segs=4 join=mitre mitre_limit=2.2');
+
+    location_up_guitar_line := ST_OffsetCurve(location_up_line, -0.0075 * pos, 'quad_segs=4 join=mitre mitre_limit=2.2');
+    location_bottom_guitar_line := ST_OffsetCurve(location_bottom_line, -0.0075 * pos, 'quad_segs=4 join=mitre mitre_limit=2.2');
+
+    -- Ajustar el layout del cable
+    IF ST_Distance(ST_EndPoint(cable_record.layout_geom), building_record.layout_geom) > ST_Distance(ST_StartPoint(cable_record.layout_geom), building_record.layout_geom) THEN
+        new_cable_layout_geom := ST_Reverse(cable_record.layout_geom);
+    ELSE
+        new_cable_layout_geom := cable_record.layout_geom;
+    END IF;
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), building_bottom_guitar_line)
+        );
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), building_up_guitar_line)
+        );
+
+    floor_up_line_points := ST_LineInterpolatePoints(floor_up_line, 0.045, true);
+
+    FOR i IN 1..ST_NumGeometries(floor_up_line_points) LOOP
+        pos := ST_NumGeometries(floor_up_line_points) - i;
+        EXECUTE format('SELECT COUNT(*) FROM %I.fo_cable WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO count_cable_3 USING ST_GeometryN(floor_up_line_points, pos);
+        IF count_cable = 0 THEN
+            new_cable_layout_geom := ST_MakeLine(
+                    new_cable_layout_geom,
+                    ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_Intersection(building_up_guitar_line, ST_ShortestLine(building_up_line, ST_GeometryN(floor_up_line_points, pos))))
+                );
+
+            new_cable_layout_geom := ST_MakeLine(
+                    new_cable_layout_geom,
+                    ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_GeometryN(floor_up_line_points, pos))
+                );
+            EXIT;
+        END IF;
+    END LOOP;
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), floor_up_guitar_line)
+        );
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), floor_bottom_guitar_line)
+        );
+
+    location_face_points := ST_LineInterpolatePoints(location_bottom_line, 0.045, true);
+
+    FOR i IN 1..ST_NumGeometries(location_face_points) LOOP
+        pos := ST_NumGeometries(location_face_points) - i;
+        EXECUTE format('SELECT COUNT(*) FROM %I.fo_cable WHERE ST_Distance(layout_geom, $1) < 0.00003', schema_name) INTO count_cable_4 USING ST_GeometryN(location_face_points, pos);
+        IF count_cable = 0 THEN
+            new_cable_layout_geom := ST_MakeLine(
+                    new_cable_layout_geom,
+                    ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_Intersection(floor_bottom_guitar_line, ST_ShortestLine(floor_bottom_line, ST_GeometryN(location_face_points, pos))))
+                );
+
+            new_cable_layout_geom := ST_MakeLine(
+                    new_cable_layout_geom,
+                    ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_GeometryN(location_face_points, pos))
+                );
+            EXIT;
+        END IF;
+    END LOOP;
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), location_bottom_guitar_line)
+        );
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), location_up_guitar_line)
+        );
+
+-- Primero, obtener el conteo de cables en la proximidad del rack
+EXECUTE format('SELECT COUNT(*) FROM %I.fo_cable WHERE ST_Distance(layout_geom, $1) < 0.0001', schema_name) INTO count_cable_5 USING rack_record.layout_geom;
+
+-- Luego, usar el conteo obtenido para definir la línea de la guitarra del rack
+rack_in_guitar_line := ST_LineExtend(
+    ST_OffsetCurve(
+        rack_in_line, 
+        0.0075 * (count_cable_5 + 1), 
+        'quad_segs=4 join=mitre mitre_limit=2.2'
+    ), 
+    0.50, 
+    0.50
+);
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_Intersection(rack_in_guitar_line, location_up_guitar_line))
+        );
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_Intersection(rack_in_guitar_line, ST_LineExtend(ST_ShortestLine(rack_in_guitar_line, ST_GeometryN(ST_LineInterpolatePoints(rack_in_line, 0.05, true), 19)), 0.005, 0.005)))
+        );
+
+    new_cable_layout_geom := ST_MakeLine(
+            new_cable_layout_geom,
+            ST_ShortestLine(ST_EndPoint(new_cable_layout_geom), ST_GeometryN(ST_LineInterpolatePoints(rack_in_line, 0.05, true), 19))
+        );
+
+    IF ST_Distance(ST_EndPoint(cable_record.layout_geom), building_record.layout_geom) > ST_Distance(ST_StartPoint(cable_record.layout_geom), building_record.layout_geom) THEN
+        new_cable_layout_geom := ST_Reverse(new_cable_layout_geom);
+    END IF; 
+
+    -- Actualizar el cable
+    EXECUTE format('UPDATE %I.fo_cable SET layout_geom = $1 WHERE id_gis = $2', schema_name) USING new_cable_layout_geom, cable_record.id_gis;
+
+    -- Volver a seleccionar el cable
+    EXECUTE format('SELECT * FROM %I.fo_cable WHERE id_gis = $1', schema_name) INTO cable_record USING cable_record.id_gis;
+
+    -- Llamar a la función de actualización
+    PERFORM update_fo_fiber_to_splice(schema_name, cable_record.id_gis, cable_record.layout_geom);
+END;
+$$
+LANGUAGE plpgsql;
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
+CREATE OR REPLACE FUNCTION update_fo_fiber_to_splice(
+    schema_name TEXT, 
+    id_gis_cable VARCHAR, 
+    cable_geom GEOMETRY
+) RETURNS void
+AS
+$$
+DECLARE
+    width FLOAT;
+    new_geom_aux GEOMETRY;
+    current_fiber RECORD;
+BEGIN
+    width := 0.0000375;
+
+    -- Actualiza todas las fibras para hacer match con la geometría del cable padre
+    FOR current_fiber IN EXECUTE format(
+        'SELECT * FROM %I.fo_fiber WHERE id_cable = $1 ORDER BY id_gis',
+        schema_name
+    ) USING id_gis_cable
+    LOOP
+        -- Calcula la nueva geometría con un offset negativo
+        new_geom_aux := ST_LineMerge(
+            ST_OffsetCurve(cable_geom, -width, 'quad_segs=4 join=mitre mitre_limit=2.2')
+        );
+
+        -- Reversa la geometría si es necesario
+        IF ST_Distance(ST_StartPoint(cable_geom), ST_StartPoint(new_geom_aux)) > 0.006 THEN
+            new_geom_aux := ST_Reverse(new_geom_aux);
+        END IF;
+
+        -- Actualiza la geometría de la fibra en la base de datos
+        EXECUTE format(
+            'UPDATE %I.fo_fiber SET layout_geom = $1, source = null, target = null WHERE id_gis = $2',
+            schema_name
+        ) USING new_geom_aux, current_fiber.id_gis;
+
+        -- Incrementa el ancho para la próxima fibra
+        width := width + 0.0000375;
+    END LOOP;
+END;
+$$
+LANGUAGE plpgsql;
+
+
+-------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------
+
+--INSERCIÓN DE EMPALMES EN EDIFICIOS
+SELECT insert_fo_splice_on_building('objects','cw_building_2', 1,'6a90e563-c016-4a30-aab3-91047725d7b5');
+
+-------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------
+--INSERCIÓN DE OPTICAL SPLITTERS
 SELECT optical_splitter_insert_func('fo_splice_2', 4, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
 SELECT optical_splitter_insert_func('fo_splice_2', 16, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
 SELECT optical_splitter_insert_func('fo_splice_7', 8, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
@@ -8884,12 +9529,72 @@ SELECT optical_splitter_insert_func('fo_splice_7', 8, 'objects','74af23be-6a0a-4
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-SELECT insert_ont_on_client('objects','cw_client_355');
-SELECT insert_ont_on_client('objects','cw_client_341');
-SELECT insert_ont_on_client('objects','cw_client_342');
-SELECT insert_ont_on_client('objects','cw_client_343');
-SELECT insert_ont_on_client('objects','cw_client_311');
-SELECT insert_ont_on_client('objects','cw_client_303');
+--CONECTAR CABLES CON EMPALMES
+SELECT connect_objects('objects', 'fo_cable_59', 'fo_splice_11');
+SELECT connect_objects('objects', 'fo_cable_60', 'fo_splice_13');
+SELECT connect_objects('objects', 'fo_cable_62', 'fo_splice_13');
+SELECT connect_objects('objects', 'fo_cable_63', 'fo_splice_13');
+SELECT connect_objects('objects', 'fo_cable_64', 'fo_splice_13');
+SELECT connect_objects('objects', 'fo_cable_44', 'fo_splice_13');
+SELECT connect_objects('objects', 'fo_cable_45', 'fo_splice_13');
+
+
+SELECT connect_objects('objects', 'fo_cable_51', 'fo_splice_7');
+SELECT connect_objects('objects', 'fo_cable_54', 'fo_splice_7');
+SELECT connect_objects('objects', 'fo_cable_52', 'fo_splice_8');
+SELECT connect_objects('objects', 'fo_cable_53', 'fo_splice_8');
+
+
+SELECT connect_objects('objects', 'fo_cable_38', 'fo_splice_4');
+SELECT connect_objects('objects', 'fo_cable_39', 'fo_splice_5');
+SELECT connect_objects('objects', 'fo_cable_42', 'fo_splice_4');
+SELECT connect_objects('objects', 'fo_cable_43', 'fo_splice_5');
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+
+--CONECTAR FIBRAS
+SELECT connect_objects('objects', 'fo_fiber_7210', 'fo_fiber_7635');
+SELECT connect_objects('objects', 'fo_fiber_7215', 'fo_fiber_7636');
+SELECT connect_objects('objects', 'fo_fiber_7216', 'fo_fiber_7637');
+
+--CONEXIÓN DE HILOS Y POSTES
+SELECT connect_objects('objects', 'fo_fiber_5330', 'fo_fiber_5910');
+SELECT connect_objects('objects', 'fo_fiber_5335', 'fo_fiber_5915');
+SELECT connect_objects('objects', 'fo_fiber_5475', 'fo_fiber_6050');
+SELECT connect_objects('objects', 'fo_fiber_5480', 'fo_fiber_6055');
+
+--CONEXIÓN CON SPLITTERS
+SELECT connect_objects('objects', 'fo_fiber_7221', 'in_port_3');
+SELECT connect_objects('objects', 'fo_fiber_7640', 'out_port_21');
+SELECT connect_objects('objects', 'fo_fiber_7645', 'out_port_22');
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+
+--INSERCIÓN DE CLIENTES
+SELECT insert_ont_on_client('objects','cw_client_355','6a90e563-c016-4a30-aab3-91047725d7b5');
+SELECT insert_ont_on_client('objects','cw_client_341','6a90e563-c016-4a30-aab3-91047725d7b5');
+SELECT insert_ont_on_client('objects','cw_client_342','6a90e563-c016-4a30-aab3-91047725d7b5');
+SELECT insert_ont_on_client('objects','cw_client_343','6a90e563-c016-4a30-aab3-91047725d7b5');
+SELECT insert_ont_on_client('objects','cw_client_311','6a90e563-c016-4a30-aab3-91047725d7b5');
+SELECT insert_ont_on_client('objects','cw_client_303','6a90e563-c016-4a30-aab3-91047725d7b5');
+
+-------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------
+
+--CONECTAR EMPALMES CON CLIENTES
+SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_343');
+SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_341');
+SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_342');
+SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_303');
+SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_311');
+
+-------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------
+
+--INSERCIÓN DE CLIENTE EN EL SUELO
+SELECT insert_client_on_floor('objects','cw_floor_37', '6a90e563-c016-4a30-aab3-91047725d7b5');
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
