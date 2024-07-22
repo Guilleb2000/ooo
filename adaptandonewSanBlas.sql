@@ -4018,7 +4018,7 @@ CREATE TABLE objects.optical_splitter (
 
 
 
-CREATE OR REPLACE FUNCTION optical_splitter_insert_func(id_gis_splice VARCHAR, n_puertos_salida INTEGER, dest_schema TEXT, edited_by UUID) RETURNS void
+CREATE OR REPLACE FUNCTION optical_splitter_insert_func(schema_name TEXT, id_gis_splice VARCHAR, n_puertos_salida INTEGER, edited_by UUID) RETURNS void
 AS
 $$
 DECLARE
@@ -4036,13 +4036,13 @@ BEGIN
 
 
     -- Dynamically select from the schema
-    EXECUTE format('SELECT * FROM %I.fo_splice WHERE id_gis = $1', dest_schema)
+    EXECUTE format('SELECT * FROM %I.fo_splice WHERE id_gis = $1', schema_name)
     INTO fo_splice
     USING id_gis_splice;
 
     -- Get the edited_by value from fo_splice
     -- Get the number of fibers crossed within the splice
-    EXECUTE format('SELECT count(*) FROM %I.fo_fiber WHERE ST_Length(ST_Intersection(layout_geom, $1)) > 0.005', dest_schema)
+    EXECUTE format('SELECT count(*) FROM %I.fo_fiber WHERE ST_Length(ST_Intersection(layout_geom, $1)) > 0.005', schema_name)
     INTO n_fibers_crossed
     USING fo_splice.layout_geom;
 
@@ -4052,11 +4052,11 @@ BEGIN
     -- Depending on the fibers that have already entered the splice, use a different offset line
     FOR i IN 0..1000 LOOP
         aux_offset_line := ST_OffsetCurve(aux_offset_line_ori, -width * (1000 + i), 'quad_segs=4 join=round');
-        EXECUTE format('SELECT count(*) FROM %I.in_port WHERE ST_Distance($1, geom) < 0.000025', dest_schema)
+        EXECUTE format('SELECT count(*) FROM %I.in_port WHERE ST_Distance($1, geom) < 0.000025', schema_name)
         INTO n_fibers_crossed
         USING aux_offset_line;
         IF n_fibers_crossed < 1 THEN
-            EXECUTE format('SELECT count(*) FROM %I.out_port WHERE ST_Distance($1, geom) < 0.000025', dest_schema)
+            EXECUTE format('SELECT count(*) FROM %I.out_port WHERE ST_Distance($1, geom) < 0.000025', schema_name)
             INTO n_fibers_crossed
             USING aux_offset_line;
             IF n_fibers_crossed < 1 THEN
@@ -4072,18 +4072,19 @@ BEGIN
         splitter_geom := ST_MakeLine(splitter_geom, ST_Centroid(ST_OffsetCurve(aux_offset_line, width, 'quad_segs=4 join=round')));
         width := width + 0.0000375;
     END LOOP;
-        -- Construcción de query_merge_value para insert_object
+                -- Construcción de query_merge_value para insert_object
     query_merge_value := format('SELECT insert_object(%L, %L, %L, %L)',
-                                top_schema, 'optical_splitter', NEW.geom, edited_by);
+                                top_schema, 'optical_splitter', splitter_geom, edited_by);
+
+    -- Insert into the dynamically selected schema with edited_by
+    EXECUTE format('INSERT INTO %I.optical_splitter(geom, edited_by) VALUES ($1, $2)', schema_name)
+    USING splitter_geom, edited_by;
     
             -- Inserción en saved_changes para cw_sewer_box
     EXECUTE format('INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, %L, %L)',
-                   dest_schema, query_merge_value, query_rollback)
+                   schema_name, query_merge_value, query_rollback)
     USING NEW.id, CONCAT('optical_splitter_', NEW.id_auto::TEXT), edited_by_value;
 
-    -- Insert into the dynamically selected schema with edited_by
-    EXECUTE format('INSERT INTO %I.optical_splitter(geom, edited_by) VALUES ($1, $2)', dest_schema)
-    USING splitter_geom, edited_by;
 END;
 $$
 LANGUAGE plpgsql;
@@ -9558,7 +9559,7 @@ SELECT connect_objects('objects', 'fo_fiber_7210', 'fo_fiber_7635');
 SELECT connect_objects('objects', 'fo_fiber_7215', 'fo_fiber_7636');
 SELECT connect_objects('objects', 'fo_fiber_7216', 'fo_fiber_7637');
 
---CONEXIÓN DE HILOS Y POSTES
+--CONEXIÓN DE HILOS EN POSTES
 SELECT connect_objects('objects', 'fo_fiber_5330', 'fo_fiber_5910');
 SELECT connect_objects('objects', 'fo_fiber_5335', 'fo_fiber_5915');
 SELECT connect_objects('objects', 'fo_fiber_5475', 'fo_fiber_6050');
@@ -9599,32 +9600,59 @@ SELECT insert_client_on_floor('objects','cw_floor_37', '6a90e563-c016-4a30-aab3-
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
-/*markdown
-CONEXIÓN DE CABLES
-*/
+SELECT insert_fo_splice_on_building('objects','cw_building_2', 5);
+SELECT connect_objects('objects','fo_splice_9', 'fo_splice_10');
+SELECT optical_splitter_insert_func('fo_splice_10', 16, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
 
-SELECT connect_cable('fo_cable_20', 'fo_splice_2','objects');
-SELECT connect_cable('fo_cable_21', 'fo_splice_2', 'objects');
-SELECT connect_cable('fo_cable_24', 'fo_splice_2','objects');
-SELECT connect_cable('fo_cable_28', 'fo_splice_2', 'objects');
-SELECT connect_cable('fo_cable_33', 'fo_splice_2', 'objects');
-
-SELECT connect_cable('fo_cable_51', 'fo_splice_7', 'objects');
-SELECT connect_cable('fo_cable_54', 'fo_splice_7', 'objects');
-SELECT connect_cable('fo_cable_52', 'fo_splice_8', 'objects');
 
 ------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
--- /*markdown
--- CONEXIÓN DE CABLES EN POSTES
--- */
+--INSERT RACKS
+SELECT insert_rack('objects', 'cw_client_343', 'NGXC-3600  Bay');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_1');
 
-SELECT connect_cable('fo_cable_42', 'fo_splice_4', 'objects');
-SELECT connect_cable('fo_cable_43', 'fo_splice_5', 'objects');
+SELECT insert_rack('objects', 'cw_client_352', 'Alcatel ODF Rack');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_2');
+
+SELECT insert_rack('objects', 'cw_client_369', 'NGXC-3600  Bay');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_3');
+
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_4');
+SELECT insert_rack('objects', 'cw_client_352', 'Wallbox');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_5');
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_6');
+SELECT insert_rack('objects', 'cw_client_352', 'Wallbox');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_7');
+SELECT insert_rack('objects', 'cw_client_352', '1660 19" Bay');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_8');
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_9');
 
 
 ------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+
+SELECT insert_shelf_on_rack('objects', 'rack_4', 'LANscape 2U');
+SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R');
+SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R');
+
+-------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------
+
+SELECT insert_card_on_rack('objects', 'rack_4', 'STM-4 S4.1N', 5, 10);
+SELECT insert_card_on_rack('objects', 'rack_4', 'E1LT-A', 1, 15);
+
+-------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------
+
+SELECT insert_card_on_shelf('objects', 'shelf_1', 'VX2000-MD Line Card', 1, 15);
+SELECT insert_card_on_shelf('objects', 'shelf_1', 'ADSL2-24', 6, 10);
+SELECT insert_card_on_shelf('objects', 'shelf_1', 'COMBO-24', 1, 15);
+
+-------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION connect_fibers() RETURNS void
@@ -9652,31 +9680,15 @@ END;
 $$
 LANGUAGE plpgsql;
 
-
 ------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
 SELECT connect_fibers();
 
-/*markdown
-CONEXIÓN DE HILOS
-*/
-
-SELECT connect_fiber('fo_fiber_7210', 'fo_fiber_7635', 'objects');
-SELECT connect_fiber('fo_fiber_7215', 'fo_fiber_7636', 'objects');
-SELECT connect_fiber('fo_fiber_7216', 'fo_fiber_7637', 'objects');
-
 ------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
--- /*markdown
--- CONEXIÓN DE HILOS EN POSTES
--- */
 
-SELECT connect_fiber('fo_fiber_5330', 'fo_fiber_5910','objects');
-SELECT connect_fiber('fo_fiber_5335', 'fo_fiber_5915', 'objects');
-SELECT connect_fiber('fo_fiber_5475', 'fo_fiber_6050', 'objects');
-SELECT connect_fiber('fo_fiber_5480', 'fo_fiber_6055', 'objects');
 
 
 ------------------------------------------------------------------------------------------------------------------------------
@@ -9701,8 +9713,6 @@ SELECT update_fiber_topology('objects');
 
 --------------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------
-
-
 
 	
 CREATE OR REPLACE FUNCTION possible_to_delete(id_gis VARCHAR) RETURNS VARCHAR AS 
