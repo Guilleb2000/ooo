@@ -2114,7 +2114,6 @@ CREATE TRIGGER sewer_box_triggger
 	AFTER INSERT ON objects.cw_sewer_box
 	FOR EACH ROW EXECUTE PROCEDURE cw_sewer_box_insert();
 
-
 CREATE OR REPLACE FUNCTION cw_sewer_box_update() RETURNS trigger AS
 $$
 DECLARE
@@ -8195,7 +8194,7 @@ LANGUAGE plpgsql;
 -------------------------------------------------------------------------------------------------------------------------------
 
 
-CREATE OR REPLACE FUNCTION insert_rack(schema_name TEXT, id_gis_location VARCHAR, rack_spec VARCHAR) RETURNS VOID AS 
+CREATE OR REPLACE FUNCTION insert_rack(schema_name TEXT, id_gis_location VARCHAR, rack_spec VARCHAR, edited_by UUID) RETURNS VOID AS 
 $$
 DECLARE
     location_record RECORD;
@@ -9517,6 +9516,7 @@ SELECT insert_fo_splice_on_building('objects','cw_building_2', 1,'6a90e563-c016-
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
+
 --INSERCIÓN DE OPTICAL SPLITTERS
 SELECT optical_splitter_insert_func('objects','fo_splice_2', 4, '0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT optical_splitter_insert_func('objects','fo_splice_2', 16,'0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
@@ -9526,6 +9526,7 @@ SELECT optical_splitter_insert_func('objects','fo_splice_7', 8, '0b85f0ac-3ec6-4
 ------------------------------------------------------------------------------------------------------------------------------
 
 --CONECTAR CABLES CON EMPALMES
+
 SELECT connect_objects('objects', 'fo_cable_59', 'fo_splice_11');
 SELECT connect_objects('objects', 'fo_cable_60', 'fo_splice_13');
 SELECT connect_objects('objects', 'fo_cable_62', 'fo_splice_13');
@@ -9550,17 +9551,20 @@ SELECT connect_objects('objects', 'fo_cable_43', 'fo_splice_5');
 ------------------------------------------------------------------------------------------------------------------------------
 
 --CONECTAR FIBRAS
+
 SELECT connect_objects('objects', 'fo_fiber_7210', 'fo_fiber_7635');
 SELECT connect_objects('objects', 'fo_fiber_7215', 'fo_fiber_7636');
 SELECT connect_objects('objects', 'fo_fiber_7216', 'fo_fiber_7637');
 
 --CONEXIÓN DE HILOS EN POSTES
+
 SELECT connect_objects('objects', 'fo_fiber_5330', 'fo_fiber_5910');
 SELECT connect_objects('objects', 'fo_fiber_5335', 'fo_fiber_5915');
 SELECT connect_objects('objects', 'fo_fiber_5475', 'fo_fiber_6050');
 SELECT connect_objects('objects', 'fo_fiber_5480', 'fo_fiber_6055');
 
 --CONEXIÓN CON SPLITTERS
+
 SELECT connect_objects('objects', 'fo_fiber_7221', 'in_port_3');
 SELECT connect_objects('objects', 'fo_fiber_7640', 'out_port_21');
 SELECT connect_objects('objects', 'fo_fiber_7645', 'out_port_22');
@@ -9569,6 +9573,7 @@ SELECT connect_objects('objects', 'fo_fiber_7645', 'out_port_22');
 ------------------------------------------------------------------------------------------------------------------------------
 
 --INSERCIÓN DE CLIENTES
+
 SELECT insert_ont_on_client('objects','cw_client_355','6a90e563-c016-4a30-aab3-91047725d7b5');
 SELECT insert_ont_on_client('objects','cw_client_341','6a90e563-c016-4a30-aab3-91047725d7b5');
 SELECT insert_ont_on_client('objects','cw_client_342','6a90e563-c016-4a30-aab3-91047725d7b5');
@@ -9580,6 +9585,7 @@ SELECT insert_ont_on_client('objects','cw_client_303','6a90e563-c016-4a30-aab3-9
 -------------------------------------------------------------------------------------------------------------------------------
 
 --CONECTAR EMPALMES CON CLIENTES
+
 SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_343');
 SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_341');
 SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_342');
@@ -9590,12 +9596,13 @@ SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_311');
 -------------------------------------------------------------------------------------------------------------------------------
 
 --INSERCIÓN DE CLIENTE EN EL SUELO
+
 SELECT insert_client_on_floor('objects','cw_floor_37', '6a90e563-c016-4a30-aab3-91047725d7b5');
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
-SELECT insert_fo_splice_on_building('objects','cw_building_2', 5);
+SELECT insert_fo_splice_on_building('objects','cw_building_2', 5,'0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT connect_objects('objects','fo_splice_9', 'fo_splice_10');
 SELECT optical_splitter_insert_func('fo_splice_10', 16, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
 
@@ -9604,28 +9611,32 @@ SELECT optical_splitter_insert_func('fo_splice_10', 16, 'objects','74af23be-6a0a
 -------------------------------------------------------------------------------------------------------------------------------
 
 --INSERT RACKS
-SELECT insert_rack('objects', 'cw_client_343', 'NGXC-3600  Bay');
+SELECT insert_rack('objects', 'cw_client_343', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_1');
 
-SELECT insert_rack('objects', 'cw_client_352', 'Alcatel ODF Rack');
+SELECT insert_rack('objects', 'cw_client_352', 'Alcatel ODF Rack','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_2');
 
-SELECT insert_rack('objects', 'cw_client_369', 'NGXC-3600  Bay');
+SELECT insert_rack('objects', 'cw_client_369', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_3');
 
-SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_4');
-SELECT insert_rack('objects', 'cw_client_352', 'Wallbox');
-SELECT connect_objects('objects', 'fo_splice_10', 'rack_5');
-SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
-SELECT connect_objects('objects', 'fo_splice_10', 'rack_6');
-SELECT insert_rack('objects', 'cw_client_352', 'Wallbox');
-SELECT connect_objects('objects', 'fo_splice_10', 'rack_7');
-SELECT insert_rack('objects', 'cw_client_352', '1660 19" Bay');
-SELECT connect_objects('objects', 'fo_splice_10', 'rack_8');
-SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
-SELECT connect_objects('objects', 'fo_splice_10', 'rack_9');
 
+SELECT insert_rack('objects', 'cw_client_352', 'Wallbox','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_5');
+
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_6');
+
+SELECT insert_rack('objects', 'cw_client_352', 'Wallbox','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_7');
+
+SELECT insert_rack('objects', 'cw_client_352', '1660 19" Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_8');
+
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT connect_objects('objects', 'fo_splice_10', 'rack_9');
 
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
@@ -9679,12 +9690,6 @@ LANGUAGE plpgsql;
 -------------------------------------------------------------------------------------------------------------------------------
 
 SELECT connect_fibers();
-
-------------------------------------------------------------------------------------------------------------------------------
--------------------------------------------------------------------------------------------------------------------------------
-
-
-
 
 ------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
