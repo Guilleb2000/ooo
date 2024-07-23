@@ -4028,12 +4028,8 @@ DECLARE
     splitter_geom GEOMETRY;
     n_fibers_crossed INTEGER;
     width FLOAT;
-    top_schema TEXT := 'objects';
-    query_merge_value TEXT;
-    query_rollback TEXT := 'Call delete procedure';
 BEGIN
     width := 0.0000375;
-
 
     -- Dynamically select from the schema
     EXECUTE format('SELECT * FROM %I.fo_splice WHERE id_gis = $1', schema_name)
@@ -4072,23 +4068,14 @@ BEGIN
         splitter_geom := ST_MakeLine(splitter_geom, ST_Centroid(ST_OffsetCurve(aux_offset_line, width, 'quad_segs=4 join=round')));
         width := width + 0.0000375;
     END LOOP;
-                -- Construcción de query_merge_value para insert_object
-    query_merge_value := format('SELECT insert_object(%L, %L, %L, %L)',
-                                top_schema, 'optical_splitter', splitter_geom, edited_by);
 
     -- Insert into the dynamically selected schema with edited_by
     EXECUTE format('INSERT INTO %I.optical_splitter(geom, edited_by) VALUES ($1, $2)', schema_name)
     USING splitter_geom, edited_by;
-    
-            -- Inserción en saved_changes para cw_sewer_box
-    EXECUTE format('INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, %L, %L)',
-                   schema_name, query_merge_value, query_rollback)
-    USING NEW.id, CONCAT('optical_splitter_', NEW.id_auto::TEXT), edited_by_value;
 
 END;
 $$
 LANGUAGE plpgsql;
-
 
 
 CREATE OR REPLACE FUNCTION optical_splitter_insert() RETURNS TRIGGER
@@ -4099,22 +4086,31 @@ DECLARE
     dest_schema TEXT := TG_TABLE_SCHEMA;
     edited_by UUID;
     action_text TEXT := 'Insert into optical_splitter';
+    query_merge_value TEXT;
+    query_rollback TEXT;
+    top_schema TEXT := 'objects';
 BEGIN
-    id_gis_splitter := CONCAT('optical_splitter_', NEW.id_auto::text);
-
-    -- Actualiza el id_gis en optical_splitter
-    EXECUTE format('UPDATE %I.optical_splitter SET id_gis = $1 WHERE id = $2', dest_schema)
-    USING id_gis_splitter, NEW.id;
 
     -- Selecciona el edited_by de optical_splitter
     EXECUTE format('SELECT edited_by FROM %I.optical_splitter WHERE id = $1', dest_schema)
     INTO edited_by
     USING NEW.id;
 
-    -- Verifica si el valor de edited_by se obtuvo correctamente
+        -- Verifica si el valor de edited_by se obtuvo correctamente
     IF edited_by IS NULL THEN
         RAISE EXCEPTION 'edited_by es NULL. Verifica la tabla optical_splitter.';
     END IF;
+
+    -- Construcción de query_merge_value para insert_object
+    query_merge_value := format('SELECT insert_object(%L, %L, %L, %L)',
+                                top_schema, 'optical_splitter', NEW.geom, edited_by);
+
+    id_gis_splitter := CONCAT('optical_splitter_', NEW.id_auto::text);
+
+    -- Actualiza el id_gis en optical_splitter
+    EXECUTE format('UPDATE %I.optical_splitter SET id_gis = $1 WHERE id = $2', dest_schema)
+    USING id_gis_splitter, NEW.id;
+
 
     -- Se crea el puerto de entrada
     EXECUTE format('INSERT INTO %I.in_port(geom, edited_by) VALUES((SELECT geom FROM ST_DumpPoints($1) WHERE path[1] = 1), $2)', dest_schema)
@@ -4131,13 +4127,10 @@ BEGIN
         -- USING id_gis_splitter, NEW.geom, i;
     END LOOP;
 
-    -- Insertamos en la tabla saved_changes los cambios de in_port
-    EXECUTE format('INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, $4)', dest_schema)
-    USING NEW.id, CONCAT('in_port_', NEW.id_auto::TEXT), edited_by, action_text;
-
-    -- Insertamos en la tabla saved_changes los cambios de out_port
-    EXECUTE format('INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, $4)', dest_schema)
-    USING NEW.id, CONCAT('out_port_', NEW.id_auto::TEXT), edited_by, action_text;
+    -- Inserción en saved_changes para cw_sewer_box
+    EXECUTE format('INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, %L, %L)',
+                   dest_schema, query_merge_value, query_rollback)
+    USING NEW.id, CONCAT('optical_splitter_', NEW.id_auto::TEXT), edited_by;
 
     RETURN NEW;
 END;
@@ -8617,6 +8610,7 @@ DECLARE
     pos_aux INTEGER;
     ok BOOLEAN := true;
     id_card_inserted INTEGER;
+    card_count INTEGER;
 BEGIN
     EXECUTE format('SELECT * FROM %I.shelf WHERE id_gis = $1', schema_name) INTO shelf_record USING id_gis_shelf;
     EXECUTE format('SELECT * FROM %I.cw_building WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO building_record USING shelf_record.layout_geom;
@@ -8664,10 +8658,11 @@ BEGIN
         FOR e IN 0..ST_NumGeometries(central_shelf_line_points)
         LOOP
             pos_aux := (ST_NumGeometries(central_shelf_line_points)) - e;
-            IF (SELECT count(*) FROM %I.card WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003) = 0 
-            THEN
-                IF pos_aux < (ST_NumGeometries(central_shelf_line_points)) - 1 
-                THEN
+
+            EXECUTE format('SELECT count(*) FROM %I.card WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name) INTO card_count USING central_shelf_line_points, pos_aux;
+
+            IF card_count = 0 THEN
+                IF pos_aux < (ST_NumGeometries(central_shelf_line_points)) - 1 THEN
                     pos_aux := pos_aux + 1;
                 END IF;
 
@@ -8689,7 +8684,8 @@ BEGIN
                             $10,
                             $11
                         )
-                    ) RETURNING id INTO $12', schema_name)
+                    ) RETURNING id', schema_name)
+                INTO id_card_inserted
                 USING
                     ST_GeometryN(central_shelf_line_points, pos),
                     card_spec,
@@ -8700,8 +8696,7 @@ BEGIN
                     card_layout_height,
                     ST_SRID(ST_GeometryN(central_shelf_line_points, pos)),
                     building_record.rotate_rads,
-                    ST_GeometryN(central_shelf_line_points, pos),
-                    id_card_inserted;
+                    ST_GeometryN(central_shelf_line_points, pos);
 
                 PERFORM create_card_ports(CONCAT('card_', id_card_inserted::TEXT), n_rows, n_cols);
                 EXIT;
@@ -9523,9 +9518,9 @@ SELECT insert_fo_splice_on_building('objects','cw_building_2', 1,'6a90e563-c016-
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 --INSERCIÓN DE OPTICAL SPLITTERS
-SELECT optical_splitter_insert_func('fo_splice_2', 4, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
-SELECT optical_splitter_insert_func('fo_splice_2', 16, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
-SELECT optical_splitter_insert_func('fo_splice_7', 8, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
+SELECT optical_splitter_insert_func('objects','fo_splice_2', 4, '0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT optical_splitter_insert_func('objects','fo_splice_2', 16,'0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT optical_splitter_insert_func('objects','fo_splice_7', 8, '0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
