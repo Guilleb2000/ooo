@@ -7417,7 +7417,6 @@ LANGUAGE plpgsql;
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-
 CREATE OR REPLACE FUNCTION insert_client_on_floor(
     schema_name TEXT, 
     id_gis_floor VARCHAR,
@@ -7777,8 +7776,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-
-
 
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
@@ -8193,8 +8190,12 @@ LANGUAGE plpgsql;
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
 
-
-CREATE OR REPLACE FUNCTION insert_rack(schema_name TEXT, id_gis_location VARCHAR, rack_spec VARCHAR, edited_by UUID) RETURNS VOID AS 
+CREATE OR REPLACE FUNCTION insert_rack(
+    schema_name TEXT,
+    id_gis_location VARCHAR,
+    rack_spec VARCHAR,
+    edited_by UUID
+) RETURNS VOID AS 
 $$
 DECLARE
     location_record RECORD;
@@ -8236,16 +8237,16 @@ BEGIN
             
             IF pos < 1 THEN
                 -- Insertar el rack en la ubicación disponible
-                EXECUTE format('INSERT INTO %I.rack(specification, geom, layout_geom) 
+                EXECUTE format('INSERT INTO %I.rack(specification, geom, layout_geom, edited_by) 
                                 VALUES($1, ST_GeometryN($2, $3), ST_Rotate(ST_MakeEnvelope(
                                     ST_X(ST_GeometryN($2, $3)) - $4,
                                     ST_Y(ST_GeometryN($2, $3)) - $5,
                                     ST_X(ST_GeometryN($2, $3)) + $4,
                                     ST_Y(ST_GeometryN($2, $3)) + $5,
                                     ST_SRID(ST_GeometryN($2, $3))
-                                ), $6, ST_GeometryN($2, $3)))',
+                                ), $6, ST_GeometryN($2, $3)), $7)',
                                 schema_name) USING rack_spec, rack_line_points, pos,
-                                              width, height, building_record.rotate_rads;
+                                              width, height, building_record.rotate_rads, edited_by;
                 inserted := true;
                 EXIT;
             END IF;
@@ -8429,8 +8430,12 @@ LANGUAGE plpgsql;
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
-
-CREATE OR REPLACE FUNCTION insert_shelf_on_rack(schema_name TEXT, id_gis_rack VARCHAR, shelf_spec VARCHAR) RETURNS VOID AS 
+CREATE OR REPLACE FUNCTION insert_shelf_on_rack(
+    schema_name TEXT,
+    id_gis_rack VARCHAR,
+    shelf_spec VARCHAR,
+    edited_by UUID
+) RETURNS VOID AS 
 $$
 DECLARE
     rack_record RECORD;
@@ -8462,6 +8467,7 @@ BEGIN
     ok := true;
     sum_height := 0;
     shelf_layout_width := 0.024;
+    pos_aux := 0;  -- Inicializar pos_aux
 
     -- Obtener información del rack y del edificio
     EXECUTE format('SELECT * FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_record USING id_gis_rack;
@@ -8532,58 +8538,63 @@ BEGIN
         central_rack_line := ST_OffsetCurve(central_rack_line, 0.004, 'quad_segs=4 join=mitre mitre_limit=2.2');
         central_rack_line_points := ST_LineInterpolatePoints(central_rack_line, (1/(((SELECT height FROM template.rack_specs WHERE model = rack_record.specification) * 100) + 10.0)), true);
 
-        -- Insertar el estante en la posición adecuada
-        FOR e IN 1..(ST_NumGeometries(central_rack_line_points)) LOOP    
-            pos_aux := (ST_NumGeometries(central_rack_line_points)) - e;
-            IF shelf_count = 0 AND card_count = 0
-                AND shelf_dist_count = 0 AND card_dist_count = 0
-            THEN     
-                IF pos_aux < (ST_NumGeometries(central_rack_line_points) - 1) THEN
-                    pos_aux := pos_aux + 1;
-                END IF;
+        -- Verificar que central_rack_line_points no sea NULL
+        IF central_rack_line_points IS NOT NULL THEN
+            -- Insertar el estante en la posición adecuada
+            FOR e IN 1..(ST_NumGeometries(central_rack_line_points)) LOOP    
+                pos_aux := (ST_NumGeometries(central_rack_line_points)) - e;
+                IF shelf_count = 0 AND card_count = 0
+                    AND shelf_dist_count = 0 AND card_dist_count = 0
+                THEN     
+                    IF pos_aux < (ST_NumGeometries(central_rack_line_points) - 1) THEN
+                        pos_aux := pos_aux + 1;
+                    END IF;
 
-                pos := pos_aux - (CEIL((SELECT height FROM template.shelf_specs WHERE model = shelf_spec) * 100)/2)::INTEGER;
+                    pos := pos_aux - (CEIL((SELECT height FROM template.shelf_specs WHERE model = shelf_spec) * 100)/2)::INTEGER;
 
-                shelf_layout_height := ST_Distance(ST_GeometryN(central_rack_line_points, pos_aux), ST_GeometryN(central_rack_line_points, pos));
-                EXECUTE format('INSERT INTO %I.shelf(geom, specification, layout_geom)
-                    VALUES (
-                        $1,
-                        $2,
-                        ST_Rotate(
-                            ST_MakeEnvelope(
-                                ST_X($3) - $4,
-                                ST_Y($5) - $6,
-                                ST_X($7) + $8,
-                                ST_Y($9) + $10,
-                                ST_SRID($11)
+                    shelf_layout_height := ST_Distance(ST_GeometryN(central_rack_line_points, pos_aux), ST_GeometryN(central_rack_line_points, pos));
+                    EXECUTE format('INSERT INTO %I.shelf(geom, specification, layout_geom, edited_by)
+                        VALUES (
+                            $1,
+                            $2,
+                            ST_Rotate(
+                                ST_MakeEnvelope(
+                                    ST_X($3) - $4,
+                                    ST_Y($5) - $6,
+                                    ST_X($7) + $8,
+                                    ST_Y($9) + $10,
+                                    ST_SRID($11)
+                                ),
+                                $12,
+                                $13
                             ),
-                            $12,
-                            $13
-                        )
-                    )', schema_name)
-                USING
-                    ST_GeometryN(central_rack_line_points, pos),
-                    shelf_spec,
-                    ST_GeometryN(central_rack_line_points, pos),
-                    shelf_layout_width,
-                    shelf_layout_height,
-                    shelf_layout_width,
-                    shelf_layout_height,
-                    ST_X(ST_GeometryN(central_rack_line_points, pos)),
-                    ST_Y(ST_GeometryN(central_rack_line_points, pos)),
-                    ST_X(ST_GeometryN(central_rack_line_points, pos)),
-                    ST_Y(ST_GeometryN(central_rack_line_points, pos)),
-                    ST_SRID(ST_GeometryN(central_rack_line_points, pos)),
-                    building_record.rotate_rads,
-                    ST_GeometryN(central_rack_line_points, pos);
-
-                EXIT;
-            END IF;
-        END LOOP;
+                            $14
+                        )', schema_name)
+                    USING
+                        ST_GeometryN(central_rack_line_points, pos),
+                        shelf_spec,
+                        ST_GeometryN(central_rack_line_points, pos),
+                        shelf_layout_width,
+                        shelf_layout_height,
+                        shelf_layout_width,
+                        shelf_layout_height,
+                        ST_X(ST_GeometryN(central_rack_line_points, pos)),
+                        ST_Y(ST_GeometryN(central_rack_line_points, pos)),
+                        ST_X(ST_GeometryN(central_rack_line_points, pos)),
+                        ST_Y(ST_GeometryN(central_rack_line_points, pos)),
+                        ST_SRID(ST_GeometryN(central_rack_line_points, pos)),
+                        building_record.rotate_rads,
+                        ST_GeometryN(central_rack_line_points, pos),
+                        edited_by;
+                    EXIT;
+                END IF;
+            END LOOP;
+        END IF;
     END IF;
 END;
 $$
 LANGUAGE plpgsql;
+
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
@@ -9521,7 +9532,7 @@ SELECT insert_fo_splice_on_building('objects','cw_building_2', 1,'6a90e563-c016-
 SELECT optical_splitter_insert_func('objects','fo_splice_2', 4, '0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT optical_splitter_insert_func('objects','fo_splice_2', 16,'0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 SELECT optical_splitter_insert_func('objects','fo_splice_7', 8, '0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
-
+ 
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
@@ -9585,7 +9596,6 @@ SELECT insert_ont_on_client('objects','cw_client_303','6a90e563-c016-4a30-aab3-9
 -------------------------------------------------------------------------------------------------------------------------------
 
 --CONECTAR EMPALMES CON CLIENTES
-
 SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_343');
 SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_341');
 SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_342');
@@ -9596,7 +9606,6 @@ SELECT connect_objects('objects', 'fo_splice_9', 'cw_client_311');
 -------------------------------------------------------------------------------------------------------------------------------
 
 --INSERCIÓN DE CLIENTE EN EL SUELO
-
 SELECT insert_client_on_floor('objects','cw_floor_37', '6a90e563-c016-4a30-aab3-91047725d7b5');
 
 -------------------------------------------------------------------------------------------------------------------------------
@@ -9606,9 +9615,8 @@ SELECT insert_fo_splice_on_building('objects','cw_building_2', 5,'0b85f0ac-3ec6-
 SELECT connect_objects('objects','fo_splice_9', 'fo_splice_10');
 SELECT optical_splitter_insert_func('fo_splice_10', 16, 'objects','74af23be-6a0a-4e48-a345-0f9cf4726e5c');
 
-
 ------------------------------------------------------------------------------------------------------------------------------
--------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
 
 --INSERT RACKS
 SELECT insert_rack('objects', 'cw_client_343', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
@@ -9641,9 +9649,9 @@ SELECT connect_objects('objects', 'fo_splice_10', 'rack_9');
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-SELECT insert_shelf_on_rack('objects', 'rack_4', 'LANscape 2U');
-SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R');
-SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R');
+SELECT insert_shelf_on_rack('objects', 'rack_4', 'LANscape 2U','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
@@ -9713,7 +9721,6 @@ SELECT update_fiber_topology('objects');
 
 --------------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------
-
 	
 CREATE OR REPLACE FUNCTION possible_to_delete(id_gis VARCHAR) RETURNS VARCHAR AS 
 $$
@@ -9820,7 +9827,6 @@ BEGIN
 END;
 $$ 
 LANGUAGE plpgsql;
-
 
 --------------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------------------
