@@ -8193,8 +8193,7 @@ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION insert_rack(
     schema_name TEXT,
     id_gis_location VARCHAR,
-    rack_spec VARCHAR,
-    edited_by UUID
+    rack_spec VARCHAR
 ) RETURNS VOID AS 
 $$
 DECLARE
@@ -8206,16 +8205,32 @@ DECLARE
     height FLOAT;
     width FLOAT;
     inserted BOOLEAN;
+    existing_rack_count INTEGER;
 BEGIN
     height := 0.054;
     width := 0.03;
     inserted := false;
 
-    -- Obtener registros de ubicación y edificio
+    -- Fetch location record
     EXECUTE format('SELECT * FROM %I.cw_client WHERE id_gis = $1', schema_name) INTO location_record USING id_gis_location;
+
+    -- Fetch building record
     EXECUTE format('SELECT * FROM %I.cw_building WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO building_record USING location_record.geom;
 
-    FOR i IN 2..5 LOOP
+    -- Check if records are present
+    IF location_record IS NULL THEN
+        RAISE NOTICE 'Location record is NULL for id_gis: %', id_gis_location;
+        RETURN;
+    END IF;
+    
+    IF building_record IS NULL THEN
+        RAISE NOTICE 'Building record is NULL for location geom';
+        RETURN;
+    END IF;
+
+    -- Iterate to find a suitable rack position
+    FOR i IN 2..5
+    LOOP
         aux_rack_line := ST_OffsetCurve(
             ST_MakeLine(
                 (SELECT geom FROM ST_DumpPoints(location_record.layout_geom) WHERE path[2] = 4),
@@ -8224,29 +8239,36 @@ BEGIN
             -0.15 * i,
             'quad_segs=4 join=mitre mitre_limit=2.2'
         );
+        
+        rack_line_points := (SELECT ST_LineInterpolatePoints(aux_rack_line, (1::FLOAT / (6+1)::FLOAT), true));
 
-        rack_line_points := ST_LineInterpolatePoints(aux_rack_line, (1::FLOAT / (6+1)::FLOAT), true);
-
-        FOR e IN 1..ST_NumGeometries(rack_line_points) LOOP
+        FOR e IN 0..ST_NumGeometries(rack_line_points)
+        LOOP
             IF inserted THEN EXIT; END IF;
             pos := 6 - e;
             IF pos < 3 THEN EXIT; END IF;
 
-            -- Verificar si ya hay un rack en esa ubicación
-            EXECUTE format('SELECT count(*) FROM %I.rack WHERE ST_Intersects(layout_geom, ST_GeometryN($1, $2))', schema_name) INTO pos USING rack_line_points, pos;
-            
-            IF pos < 1 THEN
-                -- Insertar el rack en la ubicación disponible
-                EXECUTE format('INSERT INTO %I.rack(specification, geom, layout_geom, edited_by) 
-                                VALUES($1, ST_GeometryN($2, $3), ST_Rotate(ST_MakeEnvelope(
-                                    ST_X(ST_GeometryN($2, $3)) - $4,
-                                    ST_Y(ST_GeometryN($2, $3)) - $5,
-                                    ST_X(ST_GeometryN($2, $3)) + $4,
-                                    ST_Y(ST_GeometryN($2, $3)) + $5,
-                                    ST_SRID(ST_GeometryN($2, $3))
-                                ), $6, ST_GeometryN($2, $3)), $7)',
-                                schema_name) USING rack_spec, rack_line_points, pos,
-                                              width, height, building_record.rotate_rads, edited_by;
+            EXECUTE format('SELECT count(*) FROM %I.rack WHERE ST_Intersects(layout_geom, $1)', schema_name)
+            INTO existing_rack_count
+            USING ST_GeometryN(rack_line_points, pos);
+
+            IF existing_rack_count < 1 THEN
+                EXECUTE format('INSERT INTO %I.rack (specification, geom, layout_geom) VALUES ($1, $2, $3)', schema_name)
+                USING
+                    rack_spec,
+                    ST_GeometryN(rack_line_points, pos),
+                    ST_Rotate(
+                        ST_MakeEnvelope(
+                            ST_X(ST_GeometryN(rack_line_points, pos)) - width,  -- Coordenada x de la esquina inferior izquierda
+                            ST_Y(ST_GeometryN(rack_line_points, pos)) - height, -- Coordenada y de la esquina inferior izquierda
+                            ST_X(ST_GeometryN(rack_line_points, pos)) + width,  -- Coordenada x de la esquina superior derecha
+                            ST_Y(ST_GeometryN(rack_line_points, pos)) + height, -- Coordenada y de la esquina superior derecha
+                            ST_SRID(ST_GeometryN(rack_line_points, pos))
+                        ),
+                        building_record.rotate_rads,
+                        ST_GeometryN(rack_line_points, pos)
+                    );
+
                 inserted := true;
                 EXIT;
             END IF;
@@ -8255,6 +8277,8 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
+
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
@@ -8430,6 +8454,7 @@ LANGUAGE plpgsql;
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
+
 CREATE OR REPLACE FUNCTION insert_shelf_on_rack(
     schema_name TEXT,
     id_gis_rack VARCHAR,
@@ -8651,7 +8676,7 @@ BEGIN
                     (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4)
                 ),
                 ST_MakeLine(
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4), 
+                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4),
                     (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=5)
                 )
             ] FROM %I.shelf WHERE id_gis = $1', schema_name) INTO shelf_faces_array USING id_gis_shelf;
@@ -8726,7 +8751,8 @@ CREATE OR REPLACE FUNCTION insert_card_on_rack(
     id_gis_rack VARCHAR,
     card_spec VARCHAR,
     n_rows INTEGER,
-    n_cols INTEGER
+    n_cols INTEGER,
+    edited_by UUID
 ) RETURNS VOID AS 
 $$
 DECLARE
@@ -8813,7 +8839,7 @@ BEGIN
         USING central_rack_line, rack_record;
 
         FOR e IN 1..(ST_NumGeometries(central_rack_line_points))
-        LOOP    
+        LOOP
             pos_aux := (ST_NumGeometries(central_rack_line_points)) - e;
 
             EXECUTE format('SELECT COUNT(*) FROM %I.shelf WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.003', schema_name) INTO shelf_count USING central_rack_line_points, pos_aux;
@@ -8837,7 +8863,7 @@ BEGIN
                                 ST_X($3) - 0.022,  
                                 ST_Y($4) - $5,   
                                 ST_X($6) + 0.022,  
-                                ST_Y($7) + $8,   
+                                ST_Y($7) + $8,
                                 ST_SRID($9)
                             ),
                             $10,
@@ -8856,7 +8882,6 @@ BEGIN
                     building_record.rotate_rads,
                     ST_GeometryN(central_rack_line_points, pos),
                     id_card_inserted;
-
                 PERFORM create_card_ports(CONCAT('card_', id_card_inserted::TEXT), n_rows, n_cols);
                 EXIT;
             END IF;
@@ -9619,31 +9644,31 @@ SELECT optical_splitter_insert_func('fo_splice_10', 16, 'objects','74af23be-6a0a
 ------------------------------------------------------------------------------------------------------------------------------
 
 --INSERT RACKS
-SELECT insert_rack('objects', 'cw_client_343', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_343', 'NGXC-3600  Bay');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_1');
 
-SELECT insert_rack('objects', 'cw_client_352', 'Alcatel ODF Rack','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', 'Alcatel ODF Rack');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_2');
 
-SELECT insert_rack('objects', 'cw_client_369', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_369', 'NGXC-3600  Bay');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_3');
 
-SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_4');
 
-SELECT insert_rack('objects', 'cw_client_352', 'Wallbox','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', 'Wallbox');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_5');
 
-SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_6');
 
-SELECT insert_rack('objects', 'cw_client_352', 'Wallbox','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', 'Wallbox');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_7');
 
-SELECT insert_rack('objects', 'cw_client_352', '1660 19" Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', '1660 19" Bay');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_8');
 
-SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_rack('objects', 'cw_client_352', 'NGXC-3600  Bay');
 SELECT connect_objects('objects', 'fo_splice_10', 'rack_9');
 
 ------------------------------------------------------------------------------------------------------------------------------
