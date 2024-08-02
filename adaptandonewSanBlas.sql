@@ -182,8 +182,9 @@ BEGIN
         RETURN NEXT;
     END LOOP;
 END;
-
 $$ LANGUAGE plpgsql;
+
+
 CREATE OR REPLACE FUNCTION generate_all_qlr_files_scheme_db(
     dbname TEXT,
     specific_scheme TEXT,
@@ -230,6 +231,8 @@ BEGIN
     END LOOP;
 END;
 $$ LANGUAGE plpgsql;
+
+
 DROP TABLE IF EXISTS jeraquia.capa;
 DROP TABLE IF EXISTS jeraquia.grupos;
 
@@ -1875,6 +1878,7 @@ DECLARE
   _version_table text := _table_name;
   _update_function_exists boolean;
   _insert_function_exists boolean;
+  _delete_function_exists boolean;
   _exclude_table text := 'saved_changes';
 BEGIN
    -- Check if the update trigger function exists
@@ -1887,21 +1891,32 @@ BEGIN
        SELECT 1 FROM pg_proc WHERE proname = format('%I_insert', _table_name)
    ) INTO _insert_function_exists;
 
-       EXECUTE format('CREATE TABLE %I.%I (LIKE %I.%I INCLUDING ALL)', _dest_schema, _version_table, _base_schema, _table_name);
-   IF _table_name != _exclude_table THEN
+   -- Check if the delete function exists
+   SELECT EXISTS (
+       SELECT 1 FROM pg_proc WHERE proname = format('%I_delete', _table_name)
+   ) INTO _delete_function_exists;
 
+   -- Create the versioned table in the destination schema
+   EXECUTE format('CREATE TABLE %I.%I (LIKE %I.%I INCLUDING ALL)', _dest_schema, _version_table, _base_schema, _table_name);
+
+   IF _table_name != _exclude_table THEN
        -- Copy data from the original table to the new table, excluding 'saved_changes'
        EXECUTE format('INSERT INTO %I.%I SELECT * FROM %I.%I', _dest_schema, _version_table, _base_schema, _table_name);
    END IF;
 
-   -- Create trigger for the new versioned table only if the update trigger function exists
-   IF _update_function_exists AND _insert_function_exists THEN
+   -- Create trigger for the new versioned table if the update trigger function exists
+   IF _update_function_exists THEN
        EXECUTE format('CREATE TRIGGER %I_update_trigger AFTER UPDATE ON %I.%I FOR EACH ROW EXECUTE PROCEDURE %I_update()', _table_name, _dest_schema, _version_table, _table_name);
    END IF;
 
-   -- Create trigger for the new versioned table (always)
+   -- Create trigger for the new versioned table if the insert trigger function exists
    IF _insert_function_exists THEN
        EXECUTE format('CREATE TRIGGER %I_insert_trigger AFTER INSERT ON %I.%I FOR EACH ROW EXECUTE PROCEDURE %I_insert()', _table_name, _dest_schema, _version_table, _table_name);
+   END IF;
+
+   -- Create trigger for the new versioned table if the delete trigger function exists
+   IF _delete_function_exists THEN
+       EXECUTE format('CREATE TRIGGER %I_delete_trigger AFTER DELETE ON %I.%I FOR EACH ROW EXECUTE PROCEDURE %I_delete()', _table_name, _dest_schema, _version_table, _table_name);
    END IF;
 
    -- Add triggers for other operations as needed
@@ -7300,11 +7315,10 @@ call create_branch('pruebaProyect', 'fe2ddf89-87ae-4b29-8123-63782d2c8635')
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-+
 --PROCEDIMIENTO DE DELETE
 CREATE OR REPLACE PROCEDURE delete_point_object(
     IN schema_name TEXT,
-    IN object_type TEXT, 
+    IN object_type TEXT,
     IN id_gis VARCHAR
 )
 LANGUAGE plpgsql
@@ -7511,7 +7525,6 @@ LANGUAGE plpgsql;
 
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
-
 
 CREATE OR REPLACE FUNCTION connect_splice_client(schema_name TEXT, id_gis_splice VARCHAR, id_gis_client VARCHAR) RETURNS RECORD AS 
 $$
@@ -8458,9 +8471,8 @@ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION insert_shelf_on_rack(
     schema_name TEXT,
     id_gis_rack VARCHAR,
-    shelf_spec VARCHAR,
-    edited_by UUID
-) RETURNS VOID AS 
+    shelf_spec VARCHAR
+) RETURNS VOID AS
 $$
 DECLARE
     rack_record RECORD;
@@ -8486,40 +8498,59 @@ DECLARE
     card_count INTEGER;
     shelf_dist_count INTEGER;
     card_dist_count INTEGER;
-    shelf_dist_count_result INTEGER;
-    card_dist_count_result INTEGER;
 BEGIN
     ok := true;
     sum_height := 0;
     shelf_layout_width := 0.024;
-    pos_aux := 0;  -- Inicializar pos_aux
 
-    -- Obtener información del rack y del edificio
+    -- Fetch rack and building records dynamically using the schema_name parameter
     EXECUTE format('SELECT * FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_record USING id_gis_rack;
     EXECUTE format('SELECT * FROM %I.cw_building WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO building_record USING rack_record.layout_geom;
 
-    -- Calcular la cantidad de estantes y tarjetas en el rack
-    EXECUTE format('SELECT COUNT(*) FROM %I.shelf WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO shelf_count USING rack_record.layout_geom;
-    EXECUTE format('SELECT COUNT(*) FROM %I.card WHERE ST_Intersects(layout_geom, $1)', schema_name) INTO card_count USING rack_record.layout_geom;
-    
-    -- Contar la cantidad de estantes y tarjetas a una distancia específica
-    EXECUTE format('SELECT COUNT(*) FROM %I.shelf WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name)
-        INTO shelf_dist_count_result USING rack_record.layout_geom, pos_aux;
-    EXECUTE format('SELECT COUNT(*) FROM %I.card WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name)
-        INTO card_dist_count_result USING rack_record.layout_geom, pos_aux;
+    -- Raise notice to show fetched records
+    RAISE NOTICE 'Rack Record: %', rack_record;
+    RAISE NOTICE 'Building Record: %', building_record;
 
-    shelf_dist_count := shelf_dist_count_result;
-    card_dist_count := card_dist_count_result;
-    
-    FOR current_shelf IN EXECUTE format('SELECT * FROM %I.shelf WHERE ST_Intersects(layout_geom, $1)', schema_name) USING rack_record.layout_geom LOOP
+    -- Calculate the sum_height of all shelves and cards in the rack
+    FOR current_shelf IN EXECUTE format('SELECT * FROM %I.shelf WHERE ST_Intersects($1, layout_geom)', schema_name) USING rack_record.layout_geom
+    LOOP
         sum_height := sum_height + (SELECT height FROM template.shelf_specs WHERE model = current_shelf.specification);
     END LOOP;
 
-    FOR current_card IN EXECUTE format('SELECT * FROM %I.card WHERE ST_Intersects(layout_geom, $1)', schema_name) USING rack_record.layout_geom LOOP
+    FOR current_card IN EXECUTE format('SELECT * FROM %I.card WHERE ST_Intersects($1, layout_geom)', schema_name) USING rack_record.layout_geom
+    LOOP
         sum_height := sum_height + current_card.height;
     END LOOP;
 
-    -- Verificar si hay espacio suficiente en el rack para insertar el estante
+    -- Store the count of shelves and cards in the variables
+    EXECUTE format('SELECT COUNT(*) FROM %I.shelf WHERE ST_Intersects($1, layout_geom)', schema_name) INTO shelf_count USING rack_record.layout_geom;
+    EXECUTE format('SELECT COUNT(*) FROM %I.card WHERE ST_Intersects($1, layout_geom)', schema_name) INTO card_count USING rack_record.layout_geom;
+
+    -- Calculate the number of shelves and cards within a specific distance
+    EXECUTE format('SELECT COUNT(*) FROM %I.shelf WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name)
+        INTO shelf_dist_count USING rack_record.layout_geom, pos_aux;
+    EXECUTE format('SELECT COUNT(*) FROM %I.card WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name)
+        INTO card_dist_count USING rack_record.layout_geom, pos_aux;
+
+    -- Display dimension and count information
+    RAISE NOTICE 'Rack Width: %, Height: %, Depth: %',
+        (SELECT width FROM template.rack_specs WHERE model = rack_record.specification),
+        (SELECT height FROM template.rack_specs WHERE model = rack_record.specification),
+        (SELECT depth FROM template.rack_specs WHERE model = rack_record.specification);
+
+    RAISE NOTICE 'Shelf Width: %, Height: %, Depth: %',
+        (SELECT width FROM template.shelf_specs WHERE model = shelf_spec),
+        (SELECT height FROM template.shelf_specs WHERE model = shelf_spec),
+        (SELECT depth FROM template.shelf_specs WHERE model = shelf_spec);
+
+    RAISE NOTICE 'Sum Height: %', sum_height;
+
+    RAISE NOTICE 'Shelf Count: %', shelf_count;
+    RAISE NOTICE 'Card Count: %', card_count;
+    RAISE NOTICE 'Shelf Distance Count: %', shelf_dist_count;
+    RAISE NOTICE 'Card Distance Count: %', card_dist_count;
+
+    -- Check if the new shelf can fit in the rack
     IF (SELECT width FROM template.rack_specs WHERE model = rack_record.specification) <= (SELECT width FROM template.shelf_specs WHERE model = shelf_spec)
         OR (SELECT height FROM template.rack_specs WHERE model = rack_record.specification) <= (sum_height + (SELECT height FROM template.shelf_specs WHERE model = shelf_spec))
         OR (SELECT depth FROM template.rack_specs WHERE model = rack_record.specification) <= (SELECT depth FROM template.shelf_specs WHERE model = shelf_spec)
@@ -8529,96 +8560,116 @@ BEGIN
         OR card_dist_count > 0
     THEN 
         ok := false;
+        RAISE NOTICE 'Shelf cannot be inserted: Dimensions or existing shelves/cards are blocking.';
+    ELSE
+        RAISE NOTICE 'Shelf can be inserted.';
     END IF;
 
     IF ok THEN
-        -- Obtener las caras del rack
-        EXECUTE format('SELECT ARRAY[
-                ST_MakeLine(
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=1), 
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2)),
-                ST_MakeLine(
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=2), 
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3)),
-                ST_MakeLine(
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=3), 
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4)),
-                ST_MakeLine(
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=4), 
-                    (SELECT geom FROM ST_DumpPoints(layout_geom) WHERE path[2]=5))
-                ] FROM %I.rack WHERE id_gis = $1', schema_name) INTO rack_faces_array USING id_gis_rack;
+        -- Create rack faces array
+        rack_faces_array := ARRAY[
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=1), 
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=2)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=2), 
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=3)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=3), 
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=4)),
+            ST_MakeLine(
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=4), 
+                (SELECT geom FROM ST_DumpPoints(rack_record.layout_geom) WHERE path[2]=5))
+        ];
 
-        -- Encontrar las caras más cortas del rack
+        -- Display rack faces
+        RAISE NOTICE 'Rack Faces: %', rack_faces_array;
+
+        -- Determine the shortest rack faces
         min_length := NULL;
-        FOR e IN 1..(array_length(rack_faces_array,1) - 2) LOOP
-            IF min_length IS NULL OR ST_Length(rack_faces_array[e]) < min_length THEN
+        FOR e IN 1..(array_length(rack_faces_array,1) - 2)
+        LOOP
+            IF min_length IS NULL OR ST_Length(rack_faces_array[e]) < min_length 
+            THEN
                 min_length := ST_Length(rack_faces_array[e]);
                 aux_face_rack_1 := rack_faces_array[e];
                 aux_face_rack_2 := rack_faces_array[e + 2];
             END IF;
-        END LOOP;    
+        END LOOP;
 
-        -- Crear la línea central del rack desplazada
-        central_rack_line := ST_MakeLine(ST_Centroid(aux_face_rack_1), ST_Centroid(aux_face_rack_2));
+        -- Display shortest rack faces
+        RAISE NOTICE 'Aux Face Rack 1: %', aux_face_rack_1;
+        RAISE NOTICE 'Aux Face Rack 2: %', aux_face_rack_2;
+
+        -- Create and offset the central rack line
+        central_rack_line := ST_MakeLine(
+            ST_Centroid(aux_face_rack_1),
+            ST_Centroid(aux_face_rack_2)
+        );
+
         central_rack_line := ST_OffsetCurve(central_rack_line, 0.004, 'quad_segs=4 join=mitre mitre_limit=2.2');
-        central_rack_line_points := ST_LineInterpolatePoints(central_rack_line, (1/(((SELECT height FROM template.rack_specs WHERE model = rack_record.specification) * 100) + 10.0)), true);
+        central_rack_line_points := ST_LineInterpolatePoints(
+            central_rack_line,
+            (1 / (((SELECT height FROM template.rack_specs WHERE model = rack_record.specification) * 100) + 10.0)),  
+            true
+        );
 
-        -- Verificar que central_rack_line_points no sea NULL
-        IF central_rack_line_points IS NOT NULL THEN
-            -- Insertar el estante en la posición adecuada
-            FOR e IN 1..(ST_NumGeometries(central_rack_line_points)) LOOP    
-                pos_aux := (ST_NumGeometries(central_rack_line_points)) - e;
-                IF shelf_count = 0 AND card_count = 0
-                    AND shelf_dist_count = 0 AND card_dist_count = 0
-                THEN     
-                    IF pos_aux < (ST_NumGeometries(central_rack_line_points) - 1) THEN
-                        pos_aux := pos_aux + 1;
-                    END IF;
+        -- Display central rack line points
+        RAISE NOTICE 'Central Rack Line Points: %', central_rack_line_points;
 
-                    pos := pos_aux - (CEIL((SELECT height FROM template.shelf_specs WHERE model = shelf_spec) * 100)/2)::INTEGER;
+        -- Find a suitable position to insert the shelf
+        FOR e IN 1..(ST_NumGeometries(central_rack_line_points))
+        LOOP    
+            pos_aux := (ST_NumGeometries(central_rack_line_points)) - e;
+            EXECUTE format('SELECT COUNT(*) FROM %I.shelf WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name)
+                INTO shelf_dist_count USING rack_record.layout_geom, ST_GeometryN(central_rack_line_points, pos_aux);
+            EXECUTE format('SELECT COUNT(*) FROM %I.card WHERE ST_Distance(layout_geom, ST_GeometryN($1, $2)) < 0.0003', schema_name)
+                INTO card_dist_count USING rack_record.layout_geom, ST_GeometryN(central_rack_line_points, pos_aux);
 
-                    shelf_layout_height := ST_Distance(ST_GeometryN(central_rack_line_points, pos_aux), ST_GeometryN(central_rack_line_points, pos));
-                    EXECUTE format('INSERT INTO %I.shelf(geom, specification, layout_geom, edited_by)
-                        VALUES (
-                            $1,
-                            $2,
-                            ST_Rotate(
-                                ST_MakeEnvelope(
-                                    ST_X($3) - $4,
-                                    ST_Y($5) - $6,
-                                    ST_X($7) + $8,
-                                    ST_Y($9) + $10,
-                                    ST_SRID($11)
-                                ),
-                                $12,
-                                $13
-                            ),
-                            $14
-                        )', schema_name)
-                    USING
-                        ST_GeometryN(central_rack_line_points, pos),
-                        shelf_spec,
-                        ST_GeometryN(central_rack_line_points, pos),
-                        shelf_layout_width,
-                        shelf_layout_height,
-                        shelf_layout_width,
-                        shelf_layout_height,
-                        ST_X(ST_GeometryN(central_rack_line_points, pos)),
-                        ST_Y(ST_GeometryN(central_rack_line_points, pos)),
-                        ST_X(ST_GeometryN(central_rack_line_points, pos)),
-                        ST_Y(ST_GeometryN(central_rack_line_points, pos)),
-                        ST_SRID(ST_GeometryN(central_rack_line_points, pos)),
-                        building_record.rotate_rads,
-                        ST_GeometryN(central_rack_line_points, pos),
-                        edited_by;
-                    EXIT;
+            -- Display distance checks
+            RAISE NOTICE 'Distance Check - Shelf Count: %', shelf_dist_count;
+            RAISE NOTICE 'Distance Check - Card Count: %', card_dist_count;
+
+            IF shelf_dist_count = 0 AND card_dist_count = 0 THEN 
+                IF pos_aux < (ST_NumGeometries(central_rack_line_points) - 1) THEN
+                    pos_aux := pos_aux + 1;
                 END IF;
-            END LOOP;
-        END IF;
+
+                pos := pos_aux - (CEIL((SELECT height FROM template.shelf_specs WHERE model = shelf_spec) * 100)/2)::INTEGER;
+
+                shelf_layout_height := ST_Distance(ST_GeometryN(central_rack_line_points, pos_aux), ST_GeometryN(central_rack_line_points, pos));
+                RAISE NOTICE 'Inserting Shelf at Position: %', pos;
+
+                -- Insert the shelf
+                EXECUTE format('
+                    INSERT INTO %I.shelf(geom, specification, layout_geom)
+                    VALUES (
+                        $1, $2, 
+                        ST_Rotate(
+                            ST_MakeEnvelope(
+                                $3, $4, $5, $6, $7
+                            ), $8, $9
+                        )
+                    )', schema_name)
+                USING
+                    ST_GeometryN(central_rack_line_points, pos),
+                    shelf_spec,
+                    ST_X(ST_GeometryN(central_rack_line_points, pos)) - shelf_layout_width,
+                    ST_Y(ST_GeometryN(central_rack_line_points, pos)) - shelf_layout_height,
+                    ST_X(ST_GeometryN(central_rack_line_points, pos)) + shelf_layout_width,
+                    ST_Y(ST_GeometryN(central_rack_line_points, pos)) + shelf_layout_height,
+                    ST_SRID(ST_GeometryN(central_rack_line_points, pos)),
+                    building_record.rotate_rads,
+                    ST_GeometryN(central_rack_line_points, pos);
+
+                EXIT;
+            END IF;
+        END LOOP;
     END IF;
 END;
 $$
 LANGUAGE plpgsql;
+
 
 
 -------------------------------------------------------------------------------------------------------------------------------
@@ -8860,9 +8911,9 @@ BEGIN
                         $2,
                         ST_Rotate(
                             ST_MakeEnvelope(
-                                ST_X($3) - 0.022,  
-                                ST_Y($4) - $5,   
-                                ST_X($6) + 0.022,  
+                                ST_X($3) - 0.022,
+                                ST_Y($4) - $5,
+                                ST_X($6) + 0.022,
                                 ST_Y($7) + $8,
                                 ST_SRID($9)
                             ),
@@ -9674,9 +9725,9 @@ SELECT connect_objects('objects', 'fo_splice_10', 'rack_9');
 ------------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------------
 
-SELECT insert_shelf_on_rack('objects', 'rack_4', 'LANscape 2U','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
-SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
-SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R','0b85f0ac-3ec6-4d08-a964-25cbb7aaae05');
+SELECT insert_shelf_on_rack('objects', 'rack_4', 'LANscape 2U');
+SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R');
+SELECT insert_shelf_on_rack('objects', 'rack_4', '7342 AFAN-R');
 
 -------------------------------------------------------------------------------------------------------------------------------
 -------------------------------------------------------------------------------------------------------------------------------
