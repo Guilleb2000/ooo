@@ -7834,7 +7834,7 @@ RAISE NOTICE 'cable_record %', cable_record;
     n_cables_rack := 1;
 
     EXECUTE format('SELECT * FROM %I.rack 
-        WHERE ST_Distance(layout_geom, ST_LineExtend($1, 0.50, 0.50)) < 0.001 
+        WHERE ST_Distance(layout_geom, ST_LineExtend($1, 0.50, 0.50)) < 0.001
             AND ST_Intersects(layout_geom, $2)', schema_name) INTO current_rack_record USING in_rack_face, location_record.layout_geom;
 
     FOR current_rack_record IN
@@ -9343,6 +9343,7 @@ END;
 $$
 LANGUAGE plpgsql;
 
+
 -- Metodo dinamico para actuallización de objetos
 CREATE OR REPLACE FUNCTION update_object(json_info jsonb) RETURNS VOID AS
 $$
@@ -9402,6 +9403,47 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
+
+-- Metodo dinamico para eliminación de objetos
+CREATE OR REPLACE FUNCTION delete_object(json_info jsonb) RETURNS VOID AS
+$$
+DECLARE
+    scheme_name TEXT;
+    table_name TEXT;
+    condition TEXT := '';
+    field RECORD;
+BEGIN
+    -- Extraer el esquema y nombre de la tabla del JSON
+    scheme_name := json_info->>'scheme_name';
+    table_name := json_info->>'table_name';
+    
+    -- Recorrer las claves del objeto 'conditions'
+    FOR field IN SELECT * FROM jsonb_each(json_info->'conditions')
+    LOOP
+        -- Concatenar condiciones de eliminación
+        IF field.key = 'geom' THEN
+            RAISE EXCEPTION 'Geom field cannot be used in delete conditions';
+        ELSE
+            condition := condition || quote_ident(field.key) || ' = ' || quote_literal(field.value->>0) || ' AND ';
+        END IF;
+    END LOOP;
+    
+    -- Eliminar el último ' AND '
+    condition := rtrim(condition, ' AND ');
+
+    -- Verificar que se ha especificado alguna condición
+    IF condition = '' THEN
+        RAISE EXCEPTION 'No conditions specified for deletion';
+    END IF;
+
+    -- Construir y ejecutar la consulta de eliminación dinámica
+    EXECUTE 'DELETE FROM ' || quote_ident(scheme_name) || '.' || quote_ident(table_name) || 
+            ' WHERE ' || condition;
+END;
+$$
+LANGUAGE plpgsql;
+
 
 ------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------
