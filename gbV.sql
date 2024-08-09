@@ -9237,15 +9237,23 @@ BEGIN
     -- Ejecutar la consulta de inserción dinámica y obtener los valores del RETURNING
     EXECUTE insert_query INTO new_id, new_id_auto, change_time, record_time, new_edited_by;
     
-    -- Construir el query_merge y query_rollback (estos deben estar definidos previamente)
-    query_merge_value := FORMAT('INSERT INTO %I.%I (%s) VALUES (%s)', scheme_name, table_name, columnas, valores);
-    query_rollback := 'Call delete procedure';  -- Debes ajustar esto según sea necesario
+    -- Construir el query_merge como una llamada al mismo procedimiento insert_object
+    query_merge_value := FORMAT(
+        'SELECT insert_object(''{"scheme_name": "%s", "table_name": "%s", "fields": {"%s"}}'')',
+        scheme_name, table_name, replace(columnas || ': ' || valores, ', ', '", "')
+    );
+    
+    -- Construir el query_rollback como una llamada a delete_object
+    query_rollback := FORMAT(
+        'SELECT delete_object(''{"scheme_name": "%s", "table_name": "%s", "conditions": {"id": "%s", "id_auto": "%s"}}'')',
+        scheme_name, table_name, new_id::TEXT, new_id_auto::TEXT
+    );
 
     -- Inserción en saved_changes para cw_sewer_box usando los valores obtenidos del RETURNING
     EXECUTE format(
         'INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, %L, %L)',
         scheme_name, query_merge_value, query_rollback
-    ) USING new_id, CONCAT('cw_sewer_box_', new_id_auto::TEXT), new_edited_by;
+    ) USING new_id, CONCAT( table_name, '_', new_id_auto::TEXT), new_edited_by;
     
     -- Mostrar la consulta ejecutada
     RAISE NOTICE 'Executed Query: %', insert_query;
