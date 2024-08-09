@@ -9263,6 +9263,8 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
+
 CREATE OR REPLACE FUNCTION update_object(json_info jsonb) RETURNS VOID AS
 $$
 DECLARE
@@ -9281,6 +9283,7 @@ DECLARE
     old_values JSONB;
     new_values JSONB;
     id_auto INT;
+    id UUID;
     edited_by UUID;
 BEGIN
     -- Extraer el esquema y nombre de la tabla del JSON
@@ -9300,11 +9303,13 @@ BEGIN
     END IF;
 
     -- Consultar el valor de id_auto usando id_gis
-    EXECUTE FORMAT('SELECT id_auto FROM %I.%I WHERE id_gis = $1',
+    EXECUTE FORMAT('SELECT id_auto, id FROM %I.%I WHERE id_gis = $1',
                     scheme_name, table_name)
-    INTO id_auto USING id_gis;
+    INTO id_auto, id USING id_gis;
 
     RAISE NOTICE 'ID Auto: %', id_auto;
+
+    RAISE NOTICE 'ID: %', id;
 
     -- Verificar si id_auto fue encontrado
     IF id_auto IS NULL THEN
@@ -9336,6 +9341,7 @@ BEGIN
         END IF;
 
         RAISE NOTICE 'Field Value: %', valor;
+
     END LOOP;
 
     -- Eliminar la última coma y espacio
@@ -9380,10 +9386,11 @@ BEGIN
     RAISE NOTICE 'Edited By: %', edited_by;
 
     -- Guardar los datos en la tabla saved_changes
-    EXECUTE FORMAT(
-        'INSERT INTO %I.saved_changes(id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2, %L, %L)',
-        scheme_name, query_merge, query_rollback
-    ) USING id_gis, edited_by;
+EXECUTE FORMAT(
+    'INSERT INTO %I.saved_changes(id, id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $3, %L, %L)',
+    scheme_name, query_merge, query_rollback
+) USING id, id_gis, edited_by;
+
 
 END;
 $$
