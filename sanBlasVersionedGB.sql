@@ -9163,7 +9163,6 @@ LANGUAGE plpgsql;
 
 ------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------
-
 CREATE OR REPLACE FUNCTION insert_object(json_info jsonb) RETURNS TABLE (
     id UUID,
     id_auto INT,
@@ -9224,14 +9223,17 @@ BEGIN
     -- Ejecutar la consulta de inserción dinámica y obtener los valores del RETURNING
     EXECUTE insert_query INTO new_id, new_id_auto, change_time, record_time, new_edited_by;
     
-    -- Construir el query_merge como una llamada al mismo procedimiento
+    -- Construir el query_merge como una llamada al mismo procedimiento insert_object
     query_merge_value := FORMAT(
         'SELECT insert_object(''{"scheme_name": "%s", "table_name": "%s", "fields": {"%s"}}'')',
         scheme_name, table_name, replace(columnas || ': ' || valores, ', ', '", "')
     );
     
-    -- Construir el query_rollback (esto se puede ajustar según sea necesario)
-    query_rollback := 'Call delete procedure';
+    -- Construir el query_rollback como una llamada a delete_object
+    query_rollback := FORMAT(
+        'SELECT delete_object(''{"scheme_name": "%s", "table_name": "%s", "conditions": {"id": "%s", "id_auto": "%s"}}'')',
+        scheme_name, table_name, new_id::TEXT, new_id_auto::TEXT
+    );
 
     -- Inserción en saved_changes para cw_sewer_box usando los valores obtenidos del RETURNING
     EXECUTE format(
@@ -9247,6 +9249,7 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
 
 
 
