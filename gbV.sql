@@ -9263,7 +9263,6 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
-
 CREATE OR REPLACE FUNCTION update_object(json_info jsonb) RETURNS VOID AS
 $$
 DECLARE
@@ -9275,21 +9274,48 @@ DECLARE
     valor TEXT;
     geom_coords TEXT;
     geom_srid INT;
-    id_gis VARCHAR;
-    where_clause VARCHAR;
+    id_gis TEXT;
+    where_clause TEXT;
     query_rollback TEXT;
     query_merge TEXT;
     old_values JSONB;
     new_values JSONB;
+    id_auto INT;
+    edited_by UUID;
 BEGIN
-
     -- Extraer el esquema y nombre de la tabla del JSON
     scheme_name := json_info->>'scheme_name';
     table_name := json_info->>'table_name';
     
+    RAISE NOTICE 'Scheme Name: %', scheme_name;
+    RAISE NOTICE 'Table Name: %', table_name;
+
+    -- Extraer el id_gis del JSON
+    id_gis := json_info->'fields'->>'id_gis';
+    RAISE NOTICE 'Extracted id_gis: %', id_gis;
+    
+    -- Verificar si id_gis es NULL
+    IF id_gis IS NULL THEN
+        RAISE EXCEPTION 'id_gis no está presente en el JSON o tiene un valor nulo.';
+    END IF;
+
+    -- Consultar el valor de id_auto usando id_gis
+    EXECUTE FORMAT('SELECT id_auto FROM %I.%I WHERE id_gis = $1',
+                    scheme_name, table_name)
+    INTO id_auto USING id_gis;
+
+    RAISE NOTICE 'ID Auto: %', id_auto;
+
+    -- Verificar si id_auto fue encontrado
+    IF id_auto IS NULL THEN
+        RAISE EXCEPTION 'No se encontró el id_auto para id_gis %.', id_gis;
+    END IF;
+
     -- Recorrer las claves del objeto 'fields'
     FOR field IN SELECT * FROM jsonb_each(json_info->'fields')
     LOOP
+        RAISE NOTICE 'Processing field: %', field.key;
+        
         -- Concatenar nombres de columnas
         IF field.key <> 'id_gis' THEN
             columnas := columnas || quote_ident(field.key) || ', ';
@@ -9301,61 +9327,68 @@ BEGIN
             geom_srid := (field.value->>'srid')::INT;
             valor := 'ST_GeomFromText(' || quote_literal(geom_coords) || ', ' || geom_srid || ')';
         ELSE
-            IF field.key = 'id_gis' THEN
-                id_gis := quote_literal(field.value->>0);
-            ELSE 
-                valor := quote_literal(field.value->>0);
-            END IF;
+            valor := quote_literal(field.value->>0);
         END IF;
 
         IF valor IS NOT NULL THEN
             -- Concatenar valores generando el set del update
             valores := valores || quote_ident(field.key) || ' = ' || valor || ', ';
         END IF;
+
+        RAISE NOTICE 'Field Value: %', valor;
     END LOOP;
-    
+
     -- Eliminar la última coma y espacio
     valores := rtrim(valores, ', ');
-    where_clause := 'id_gis = ' || id_gis;
+    RAISE NOTICE 'Update Values: %', valores;
+
+    -- Construir la cláusula WHERE usando id_gis
+    where_clause := 'id_gis = ' || quote_literal(id_gis);
+    RAISE NOTICE 'Where Clause: %', where_clause;
 
     -- Obtener el estado actual del objeto antes de modificarlo
-    EXECUTE 'SELECT row_to_json(t) FROM (SELECT * FROM ' || 
-            quote_ident(scheme_name) || '.' || quote_ident(table_name) || 
-            ' WHERE ' || where_clause || ') t'
+    EXECUTE FORMAT('SELECT row_to_json(t) FROM (SELECT * FROM %I.%I WHERE %s) t',
+                    scheme_name, table_name, where_clause)
     INTO old_values;
 
+    RAISE NOTICE 'Old Values: %', old_values;
+
     -- Construir y ejecutar la consulta de actualización dinámica
-    EXECUTE 'UPDATE ' || quote_ident(scheme_name) || '.' || quote_ident(table_name) || 
-            ' SET ' || valores ||
-            ' WHERE ' || where_clause;
+    EXECUTE FORMAT('UPDATE %I.%I SET %s WHERE %s',
+                    scheme_name, table_name, valores, where_clause);
 
     -- Obtener el nuevo estado del objeto después de la modificación
-    EXECUTE 'SELECT row_to_json(t) FROM (SELECT * FROM ' || 
-            quote_ident(scheme_name) || '.' || quote_ident(table_name) || 
-            ' WHERE ' || where_clause || ') t'
+    EXECUTE FORMAT('SELECT row_to_json(t) FROM (SELECT * FROM %I.%I WHERE %s) t',
+                    scheme_name, table_name, where_clause)
     INTO new_values;
 
+    RAISE NOTICE 'New Values: %', new_values;
+
     -- Construir query_rollback como una llamada a update_object con el estado anterior
-    query_rollback := 'SELECT update_object(' || 
-                      quote_literal('{"scheme_name": "' || scheme_name || 
-                                    '", "table_name": "' || table_name || 
-                                    '", "fields": ' || old_values || '}') || ')';
+    query_rollback := 'SELECT update_object(' ||
+                      quote_literal('{"scheme_name":"' || scheme_name || '","table_name":"' || table_name || '","fields":' || old_values::TEXT || '}') || ');';
 
     -- Construir query_merge como una llamada a update_object con el nuevo estado
-    query_merge := 'SELECT update_object(' || 
-                   quote_literal('{"scheme_name": "' || scheme_name || 
-                                 '", "table_name": "' || table_name || 
-                                 '", "fields": ' || new_values || '}') || ')';
+    query_merge := 'SELECT update_object(' ||
+                   quote_literal('{"scheme_name":"' || scheme_name || '","table_name":"' || table_name || '","fields":' || new_values::TEXT || '}') || ');';
+
+    RAISE NOTICE 'Query Rollback: %', query_rollback;
+    RAISE NOTICE 'Query Merge: %', query_merge;
+
+    -- Obtener edited_by
+    edited_by := (json_info->'fields'->>'edited_by')::UUID;
+    RAISE NOTICE 'Edited By: %', edited_by;
 
     -- Guardar los datos en la tabla saved_changes
-    EXECUTE format(
+    EXECUTE FORMAT(
         'INSERT INTO %I.saved_changes(id_gis, change_time, record_time, user_id, query_merge, query_rollback) VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2, %L, %L)',
         scheme_name, query_merge, query_rollback
-    ) USING id_gis, (json_info->>'edited_by')::UUID;
+    ) USING id_gis, edited_by;
 
 END;
 $$
 LANGUAGE plpgsql;
+
 
 
 ------------------------------------------------------------------------------------
